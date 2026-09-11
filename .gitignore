@@ -18,6 +18,7 @@ __pycache__/
 venv/
 
 # ── 本地凭据 / 密钥（绝不提交）──
+# 注意：不要在这里写 !*.token 之类的否定规则，否则 .token 会被重新纳入跟踪。
 .token
 *.token
 gh_token*
