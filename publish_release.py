@@ -192,24 +192,41 @@ def git_publish(owner, rname, token, branch='main', commit_msg=''):
               '"x-access-token" "$WE_GH_TOKEN"; }; f')
     env = dict(os.environ, WE_GH_TOKEN=token)
     log(f'  推送到 {owner}/{rname} ({branch})')
-    try:
-        r = subprocess.run(
-            ['git', '-c', f'credential.helper={helper}', 'push', '-u', 'origin', branch],
-            cwd=ROOT, text=True, encoding='utf-8', errors='replace',
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
-        ok = r.returncode == 0
-        out = r.stdout or ''
-    except Exception as e:
-        ok, out = False, str(e)
 
-    if not ok:
-        # 万一 git 把凭据回显出来，这里再做一次兜底打码
-        safe = out.replace(token, '***')[:600]
-        raise SystemExit(
-            f'推送失败:\n{safe}\n\n'
-            '常见原因：网络中断（本机到 GitHub 偶发不通，重试即可）、'
-            'token 权限不足（需 repo）、或仓库地址不对。')
-    log('  推送成功')
+    # 本机到 github.com 会间歇性超时（实测 HTTPS 探测稳定、git 偶发 21s 连接超时），
+    # 所以这里放宽 git 的超时与缓冲并自动重试，避免整个流程因为一次抖动白跑。
+    git_cfg = [
+        '-c', f'credential.helper={helper}',
+        '-c', 'http.lowSpeedLimit=1000',
+        '-c', 'http.lowSpeedTime=60',
+        '-c', 'http.postBuffer=524288000',
+    ]
+    attempts = 4
+    for i in range(1, attempts + 1):
+        try:
+            r = subprocess.run(
+                ['git'] + git_cfg + ['push', '-u', 'origin', branch],
+                cwd=ROOT, text=True, encoding='utf-8', errors='replace',
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+            ok = r.returncode == 0
+            out = r.stdout or ''
+        except Exception as e:
+            ok, out = False, str(e)
+        if ok:
+            log('  推送成功')
+            return
+        if i < attempts:
+            wait = 5 * i
+            log(f'  第 {i} 次推送失败（多为网络抖动），{wait} 秒后重试…')
+            time.sleep(wait)
+
+    safe = out.replace(token, '***')[:600]
+    raise SystemExit(
+        f'推送失败（已重试 {attempts} 次）:\n{safe}\n\n'
+        '本机到 GitHub 网络不稳定。可以：\n'
+        '  · 稍后直接重跑本脚本（加 --skip-git 可只重传 Release 附件）\n'
+        '  · 或给 git 配代理后重试（系统代理是 127.0.0.1:7890）：\n'
+        '      git config --global http.proxy http://127.0.0.1:7890')
 
 
 def main():
