@@ -1,0 +1,16 @@
+# 统一换行：仓库内一律 LF，检出到 Windows 时自动转 CRLF。
+# 没有这个文件时，Windows 用户克隆后 git 会提示上百个文件「被修改」，很吓人。
+* text=auto eol=lf
+
+# 二进制文件不要做换行转换
+*.ico  binary
+*.node binary
+*.dll  binary
+*.exe  binary
+*.zip  binary
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+
+# 第三方库目录在语言统计里排除，避免仓库看起来像 C++ 项目
+scripts/node_modules/** linguist-vendored
