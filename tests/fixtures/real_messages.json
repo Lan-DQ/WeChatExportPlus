@@ -1,0 +1,132 @@
+{
+  "1": {
+    "local_id": "4462",
+    "local_type": "1",
+    "create_time": "1789099636",
+    "message_content": "wxid_testuser99:\n[表情]",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "49_plaintext": {
+    "local_id": "4460",
+    "local_type": "266287972401",
+    "create_time": "1789099486",
+    "message_content": "\"张三\" 拍了拍 \"L.(非节假日看到我单排请叫我学习)\"",
+    "compress_content": "",
+    "sender_username": "",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "47": {
+    "local_id": "4453",
+    "local_type": "47",
+    "create_time": "1789099147",
+    "message_content": "wxid_testuser99:\n<msg><emoji fromusername=\"wxid_testuser99\" tousername=\"1234567899@chatroom\" type=\"2\" idbuffer=\"media:0_0\" md5=\"072455b5ad27cd3a392bb814dcba8751\" len=\"1839\" productid=\"\" androidmd5=\"072455b5ad27cd3a392bb814dcba8751\" androidlen=\"1839\" s60v3md5=\"072455b5ad27cd3a392bb814dcba8751\" s60v3len=\"1839\" s60v5md5=\"072455b5ad27cd3a392bb814dcba8751\" s60v5len=\"1839\" cdnurl=\"http://wxapp.tc.qq.com/262/20304/stodownload?m=072455b5ad27cd3a392bb814dcba8751&amp;filekey=30340201010420301e02020106040253480410072455b5ad27cd3a392bb814dcba87510202072f040d00000004627466730000000131&amp;hy=SH&amp;storeid=32303232303832303031333030373030306265653034303030303030303063386437393630393030303030313036&amp;bizid=1023\" designerid=\"\" thumburl=\"\" encrypturl=\"http://wxapp.tc.qq.com/262/20304/stodownload?m=445855911b06d1e6513dd1dd0d370ee9&amp;filekey=30340201010420301e02020106040253480410445855911b06d1e6513dd1dd0d370ee902020730040d00000004627466730000000131&amp;hy=SH&amp;storeid=32303232303832303031333030373030306465336136303030303030303030356432393630393030303030313036&amp;bizid=1023\" aeskey=\"3680148e3cdfe25945153fe055bda4b9\" externurl=\"http://wxapp.tc.qq.com/262/20304/stodownload?m=1691a1dfbfc92d60daf230c447ad8d06&amp;filekey=30340201010420301e020201060402534804101691a1dfbfc92d60daf230c447ad8d06020203e0040d00000004627466730000000131&amp;hy=SH&amp;storeid=32303232303832303031333030383030303037373464303030303030303035363564393930623030303030313036&amp;bizid=1023\" externmd5=\"8bd1d77f15cef70e2b0bf7b321d2b375\" width=\"33\" height=\"33\" tpurl=\"\" tpauthkey=\"\" attachedtext=\"\" attachedtextcolor=\"\" lensid=\"\" emojiattr=\"\" linkid=\"\" desc=\"\"></emoji></msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "3": {
+    "local_id": "4444",
+    "local_type": "3",
+    "create_time": "1789099013",
+    "message_content": "wxid_testuser99:\n<?xml version=\"1.0\"?>\n<msg>\n\t<img aeskey=\"ad9d84bd459d9c0551012354e788a1af\" encryver=\"1\" cdnthumbaeskey=\"ad9d84bd459d9c0551012354e788a1af\" cdnthumburl=\"305f020100044b3049020100020435d5535f02033d120002049afff46d02046aa37c05042434643561633133622d633237352d346666322d393035302d306665356330303861626339020425250802020100040d004d1a49000000000000000000\" cdnthumblength=\"4513\" cdnthumbheight=\"512\" cdnthumbwidth=\"234\" cdnmidheight=\"0\" cdnmidwidth=\"0\" cdnhdheight=\"0\" cdnhdwidth=\"0\" cdnmidimgurl=\"305f020100044b3049020100020435d5535f02033d120002049afff46d02046aa37c05042434643561633133622d633237352d346666322d393035302d306665356330303861626339020425250802020100040d004d1a49000000000000000000\" length=\"711143\" md5=\"17e3d7ca048a8bf6188a34e8edbd4818\" hevc_mid_size=\"80591\" originsourcemd5=\"9d2932c37086527bc7902874c70dbd24\">\n\t\t<secHashInfoBase64>eyJwaGFzaCI6IjMwMDAwMDAwMDAwMDAwMDAiLCJwZHFIYXNoIjoiNzNlMzc4NjViODY2YjA3ODIz\nZmUzY2MzMTZhYjFiZjFjN2NiYzg3OGMyYWU2MzJjNjIwOThlMjFiNjMxYmM5MyJ9\n</secHashInfoBase64>\n\t\t<live>\n\t\t\t<duration>0</duration>\n\t\t\t<size>0</size>\n\t\t\t<md5 />\n\t\t\t<fileid />\n\t\t\t<hdsize>0</hdsize>\n\t\t\t<hdmd5 />\n\t\t\t<hdfileid />\n\t\t\t<stillimagetimems>0</stillimagetimems>\n\t\t</live>\n\t</img>\n\t<platform_signature />\n\t<imgdatahash />\n\t<ImgSourceInfo>\n\t\t<ImgSourceUrl />\n\t\t<BizType>0</BizType>\n\t</ImgSourceInfo>\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "43": {
+    "local_id": "4430",
+    "local_type": "43",
+    "create_time": "1789098783",
+    "message_content": "<?xml version=\"1.0\"?>\n<msg>\n\t<videomsg aeskey=\"d9a4013691f934c5f2d509c4498d2f69\" cdnvideourl=\"305f020100044b30490201000204d1cd039a02032e1c4f02042709ccb702046aa37b1d042462366164646237362d623932392d346535332d396135382d63356235313831373432353602040d240804020100040d004c511f000000000000000000\" cdnthumbaeskey=\"d9a4013691f934c5f2d509c4498d2f69\" cdnthumburl=\"305f020100044b30490201000204d1cd039a02032e1c4f02042709ccb702046aa37b1d042462366164646237362d623932392d346535332d396135382d63356235313831373432353602040d240804020100040d004c511f000000000000000000\" length=\"3128751\" playlength=\"9\" cdnthumblength=\"10773\" cdnthumbwidth=\"354\" cdnthumbheight=\"630\" fromusername=\"wxid_testuser99\" md5=\"49d9f043450738d27936f686663320ec\" newmd5=\"2240a3eb89a9f353388cd0d3c1e0362c\" isplaceholder=\"0\" rawmd5=\"\" rawlength=\"0\" cdnrawvideourl=\"\" cdnrawvideoaeskey=\"\" overwritenewmsgid=\"0\" originsourcemd5=\"b34ce0df9cea7f08111b7709625aa01d\" isad=\"0\" />\n<extcommoninfo>\n\t<media_expire_at>1790308383</media_expire_at>\n</extcommoninfo>\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "10000": {
+    "local_id": "4392",
+    "local_type": "10000",
+    "create_time": "1789089472",
+    "message_content": "<?xml version=\"1.0\"?><sysmsg type=\"revokemsg\"><revokemsg><content>\"李四\" 撤回了一条消息</content><revoketime>0</revoketime></revokemsg></sysmsg>",
+    "compress_content": "",
+    "sender_username": "",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "34": {
+    "local_id": "2158",
+    "local_type": "34",
+    "create_time": "1787754571",
+    "message_content": "wxid_testuser99:\n<msg><voicemsg endflag=\"1\" cancelflag=\"0\" forwardflag=\"0\" voiceformat=\"4\" voicelength=\"4601\" length=\"7703\" bufid=\"0\" aeskey=\"765609e6f33969e87d67c2260e5733f3\" voiceurl=\"7f0c0001022048964a5418b990755b48f763f4a1b267ecd05a7d0959a09c8cb0b5c4bb8c848f0301090f0001a03c0004010503000000069992b70107fbec82bd0208020000000009000a010b010ccbf0bbd4060d000e000f4e10f68291b70311046b9e926a\" voicemd5=\"\" clientmsgid=\"41323763643637333562653935303400newSendVoice_amr_2622290826267fc950d14ac101\" fromusername=\"wxid_testuser99\" silklength=\"0\" /></msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "48": {
+    "local_id": "1428",
+    "local_type": "48",
+    "create_time": "1786952225",
+    "message_content": "wxid_testuser99:\n<msg>\n\t<location x=\"40.055534\" y=\"116.616608\" scale=\"15\" label=\"某区\" maptype=\"0\" poiname=\"某机场航站楼\" poiid=\"nearby_1387370517173101781\" buildingId=\"\" floorName=\"\" poiCategoryTips=\"基础设施:交通设施:飞机场\" poiBusinessHour=\"\" poiPhone=\"\" poiPriceTips=\"0.0\" isFromPoiList=\"true\" adcode=\"\" cityname=\"\" fromusername=\"wxid_testuser99\" />\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "49_t57": {
+    "local_id": "510",
+    "local_type": "244813135921",
+    "create_time": "1785239634",
+    "message_content": "wxid_testuser99:\n<?xml version=\"1.0\"?>\n<msg>\n\t<appmsg>\n\t\t<title>回复内容，，我赏不来[表情][表情][表情]\n我最近打瓦，打绝区零，打PUBG，打雀魂</title>\n\t\t<action>view</action>\n\t\t<type>57</type>\n\t\t<finderLiveProductShare>\n\t\t\t<isPriceBeginShow>false</isPriceBeginShow>\n\t\t</finderLiveProductShare>\n\t\t<gameshare>\n\t\t\t<appbrandext>\n\t\t\t\t<priority>-1</priority>\n\t\t\t</appbrandext>\n\t\t\t<duration>-1</duration>\n\t\t</gameshare>\n\t\t<refermsg>\n\t\t\t<type>1</type>\n\t\t\t<svrid>4409563214427575190</svrid>\n\t\t\t<fromusr>1234567899@chatroom</fromusr>\n\t\t\t<chatusr>wxid_testuser99</chatusr>\n\t\t\t<displayname> user_e</displayname>\n\t\t\t<content>\n某句话</content>\n\t\t\t<msgsource>&lt;msgsource&gt;\n\t&lt;alnode&gt;\n\t\t&lt;fr&gt;1&lt;/fr&gt;\n\t&lt;/alnode&gt;\n\t&lt;silence&gt;0&lt;/silence&gt;\n\t&lt;membercount&gt;15&lt;/membercount&gt;\n\t&lt;signature&gt;N0_V1_dOH/etxe|v1_YVk3q34d&lt;/signature&gt;\n\t&lt;tmp_node&gt;\n\t\t&lt;publisher-id&gt;&lt;/publisher-id&gt;\n\t&lt;/tmp_node&gt;\n&lt;/msgsource&gt;\n</msgsource>\n\t\t\t<createtime>1785239506</createtime>\n\t\t</refermsg>\n\t\t<appattach />\n\t</appmsg>\n\t<fromusername>wxid_testuser99</fromusername>\n\t<scene>0</scene>\n\t<appinfo>\n\t\t<version>1</version>\n\t\t<appname />\n\t</appinfo>\n\t<commenturl />\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "50": {
+    "local_id": "2648",
+    "local_type": "50",
+    "create_time": "1789052705",
+    "message_content": "<voipmsg type=\"VoIPBubbleMsg\"><VoIPBubbleMsg><msg><![CDATA[通话时长 26:21]]></msg>\n<room_type>0</room_type>\n<red_dot>false</red_dot>\n<roomid>269119529419546647</roomid>\n<roomkey>0</roomkey>\n<inviteid>2344724906</inviteid>\n<msg_type>100</msg_type>\n<timestamp>1789052705285</timestamp>\n<identity><![CDATA[9091207003704257583]]></identity>\n<duration>0</duration>\n<inviteid64>1789051120042</inviteid64>\n<business>1</business>\n<caller_memberid>0</caller_memberid>\n<callee_memberid>1</callee_memberid>\n<force_update>0</force_update>\n</VoIPBubbleMsg></voipmsg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "wxid_testuser99"
+  },
+  "49_t87": {
+    "local_id": "69",
+    "local_type": "373662154801",
+    "create_time": "1787619512",
+    "message_content": "wxid_testuser99:\n<?xml version=\"1.0\"?>\n<msg>\n    <appmsg appid=\"\" sdkver=\"0\">\n        <type>87</type>\n        <url>https://support.weixin.qq.com/cgi-bin/mmsupport-bin/readtemplate?t=page/common_page__upgrade&amp;btn_text=btn_text_0&amp;text=text008</url>\n        <announcement><![CDATA[<group_notice_item type=\"18\">\n\t<edittime>1787619510</edittime>\n\t<ctrlflag>127</ctrlflag>\n\t<version>1</version>\n\t<deviceid>Aefbb5fdec57c5a7</deviceid>\n\t<source sourcetype=\"6\" sourceid=\"25558ae3d1d44e059cde1439ef16b1b9\">\n\t\t<fromusr>wxid_testuser99</fromusr>\n\t\t<tousr>1234567899@chatroom</tousr>\n\t\t<sourceid>25558ae3d1d44e059cde1439ef16b1b9</sourceid>\n\t</source>\n\t<datalist count=\"2\">\n\t\t<dataitem datatype=\"8\" dataid=\"4ed1c5f06b2e24c99954f9fd2c994e67\" htmlid=\"WeNoteHtmlFile\">\n\t\t\t<datafmt>.htm</datafmt>\n\t\t\t<cdn_dataurl>http://wxapp.tc.qq.com/264/20303/stodownload?m=915dec4ae53542d9a0f6535c24fe8656&amp;filekey=30340201010420301e02020108040253480410915dec4ae53542d9a0f6535c24fe8656020206e0040d00000004627466730000000132&amp;hy=SH&amp;storeid=26a8ce8b8000011b287c2cf910000010800004f4f53480e9cd17150034e0ba&amp;bizid=1023</cdn_dataurl>\n\t\t\t<cdn_thumbkey>dc4b841df5dfad0900d2f67d355c4d05</cdn_thumbkey>\n\t\t\t<cdn_datakey>ed6e6b25b78f4a89f26706ed8406d65d</cdn_datakey>\n\t\t\t<fullmd5>19482aa51f23156d787bab3a1ebd3e50</fullmd5>\n\t\t\t<head256md5>1c035a85154b2a306a46bafb37601ab7</head256md5>\n\t\t\t<fullsize>1753</fullsize>\n\t\t</dataitem>\n\t\t<dataitem datatype=\"1\" dataid=\"0ec180b7f66bb4ed00d3a2e5e4eec9db\" htmlid=\"-1\">\n\t\t\t<datadesc>某通知：\n\n1、注意事项一。\n2、寝室内严禁使用违规电器（吹风机、美发棒、制冷机，温热杯等小家电）。\n3、每层大洗漱间有专用插座，可以使用吹风机、美发棒。\n4、保管好个人贵重物品，养成人走灯灭，随手关门的习惯。\n5、购买使用带开关的正规厂家插排，一个插排上不能同时插过多插头，注意用电安全。\n6、请同学们妥善保管使用一卡通卡和房门钥匙，以免丢失。\n7、使用开水炉时，注意安全以免烫伤，用完切记及时结算，以免造成不必要的经济损失。\n8、生活垃圾当天产当天清，宿舍门口和走廊严禁堆放杂物以及垃圾，保证消防通道畅通。\n9、保持洗漱间、卫生间卫生，请不要往洗漱池内扔垃圾。更不要在洗漱间内存放个人的洗漱用品及私人物品，以免丢失。\n10、由于宿舍楼内人多洗衣机少，请大家洗完衣服及时取出，以便其他同学使用。\n11、请严格遵守开寝、封寝时间。因故需要早出、晚归时，提前一天联系辅导员，并同意后，将微信截图发群里，特殊情况请辅导员电话告知，宿管老师方能开门放行。\n12，自行车摆放请放置指定地点，不能放在宿舍门口；\n\n亲爱的同学们，宿舍是大家的，每个人能做一点微不足道的自律，我们的生活空间就舒服一些，请同学在北交大学府里除了学会知识，更学会管理自己的生活，祝愿同学们大学生活愉快，好好享受开启成年人的规划🎊🎊🎊🎊🎊🎶🎶🎶🎶🎶🍭🍭🍭🍭🍭🌹🌹🌹🌹🌹🌹</datadesc>\n\t\t\t<dataitemsource sourcetype=\"6\" />\n\t\t</dataitem>\n\t</datalist>\n\t<weburlitem>\n\t\t<clean_url />\n\t\t<pagedesc />\n\t\t<pagethumb_url />\n\t\t<pagetitle />\n\t\t<opencache>0</opencache>\n\t\t<contentattr>0</contentattr>\n\t\t<canvasPageXml>null</canvasPageXml>\n\t\t<extraparam />\n\t\t<wsVideoFlowXml />\n\t\t<forwardflag>0</forwardflag>\n\t</weburlitem>\n\t<productitem type=\"0\">\n\t\t<producttitle />\n\t\t<productdesc />\n\t\t<productthumb_url />\n\t\t<productinfo />\n\t</productitem>\n\t<liteappitem>\n\t\t<fallbackurl />\n\t\t<subtype>0</subtype>\n\t\t<nickname />\n\t\t<des />\n\t\t<title />\n\t\t<jumptype>0</jumptype>\n\t\t<mediatype>0</mediatype>\n\t\t<query />\n\t\t<pagepath />\n\t\t<appid />\n\t\t<istransparent>0</istransparent>\n\t\t<forbidforward>0</forbidforward>\n\t</liteappitem>\n\t<announcement_id>wxid_testuser99_123456783@chatroom_1787619512_873832204</announcement_id>\n</group_notice_item>\n]]></announcement>\n        <textannouncement><![CDATA[某通知：\n\n1、注意事项一。\n2、寝室内严禁使用违规电器（吹风机、美发棒、制冷机，温热杯等小家电）。\n3、每层大洗漱间有专用插座，可以使用吹风机、美发棒。\n4、保管好个人贵重物品，养成人走灯灭，随手关门的习惯。\n5、购买使用带开关的正规厂家插排，一个插排上不能同时插过多插头，注意用电安全。\n6、请同学们妥善保管使用一卡通卡和房门钥匙，以免丢失。\n7、使用开水炉时，注意安全以免烫伤，用完切记及时结算，以免造成不必要的经济损失。\n8、生活垃圾当天产当天清，宿舍门口和走廊严禁堆放杂物以及垃圾，保证消防通道畅通。\n9、保持洗漱间、卫生间卫生，请不要往洗漱池内扔垃圾。更不要在洗漱间内存放个人的洗漱用品及私人物品，以免丢失。\n10、由于宿舍楼内人多洗衣机少，请大家洗完衣服及时取出，以便其他同学使用。\n11、请严格遵守开寝、封寝时间。因故需要早出、晚归时，提前一天联系辅导员，并同意后，将微信截图发群里，特殊情况请辅导员电话告知，宿管老师方能开门放行。\n12，自行车摆放请放置指定地点，不能放在宿舍门口；\n\n亲爱的同学们，宿舍是大家的，每个人能做一点微不足道的自律，我们的生活空间就舒服一些，请同学在北交大学府里除了学会知识，更学会管理自己的生活，祝愿同学们大学生活愉快，好好享受开启成年人的规划🎊🎊🎊🎊🎊🎶🎶🎶🎶🎶🍭🍭🍭🍭🍭🌹🌹🌹🌹🌹🌹]]></textannouncement>\n        <xmlpuretext><![CDATA[1]]></xmlpuretext>\n        <announcement_id><![CDATA[wxid_testuser99_123456783@chatroom_1787619512_873832204]]></announcement_id>\n    </appmsg>\n    <fromusername><![CDATA[wxid_testuser99]]></fromusername>\n    <appinfo>\n        <version>1</version>\n        <appname />\n    </appinfo>\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "49_t53": {
+    "local_id": "542",
+    "local_type": "227633266737",
+    "create_time": "1789046460",
+    "message_content": "wxid_testuser99:\n<?xml version=\"1.0\"?>\n<msg>\n\t<appmsg>\n\t\t<title>#接龙\n如有同学想某项事务的参与一下接龙\n例 姓名+教材名+退订/未订\n\n1. 某同学 综合教程4，大学英语阅读与翻译上下册  退订</title>\n\t\t<action>view</action>\n\t\t<type>53</type>\n\t\t<extinfo>\n\t\t\t<solitaire_info>&lt;solitaire&gt;&lt;tt&gt;0-24&lt;/tt&gt;&lt;ex&gt;25-14&lt;/ex&gt;&lt;tl&gt;0-0&lt;/tl&gt;&lt;s&gt;.&lt;/s&gt;&lt;au&gt;wxid_testuser99&lt;/au&gt;&lt;hrt&gt;1&lt;/hrt&gt;&lt;loss&gt;0&lt;/loss&gt;&lt;content&gt;&lt;s&gt;1&lt;/s&gt;&lt;i&gt;&lt;u&gt;wxid_testuser99&lt;/u&gt;&lt;h&gt;0&lt;/h&gt;&lt;s&gt;.&lt;/s&gt;&lt;t&gt;1789046460&lt;/t&gt;&lt;r&gt;44-26&lt;/r&gt;&lt;/i&gt;&lt;/content&gt;&lt;/solitaire&gt;</solitaire_info>\n\t\t</extinfo>\n\t\t<finderLiveProductShare>\n\t\t\t<isPriceBeginShow>false</isPriceBeginShow>\n\t\t</finderLiveProductShare>\n\t\t<gameshare>\n\t\t\t<appbrandext>\n\t\t\t\t<priority>-1</priority>\n\t\t\t</appbrandext>\n\t\t\t<duration>-1</duration>\n\t\t</gameshare>\n\t\t<appattach />\n\t</appmsg>\n\t<fromusername>wxid_testuser99</fromusername>\n\t<scene>0</scene>\n\t<appinfo>\n\t\t<version>1</version>\n\t\t<appname />\n\t</appinfo>\n\t<commenturl />\n</msg>",
+    "compress_content": "",
+    "sender_username": "wxid_testuser99",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  },
+  "42": {
+    "local_id": "109",
+    "local_type": "42",
+    "create_time": "1786799530",
+    "message_content": "GOD-is-love-Jesue:\n<?xml version=\"1.0\"?>\n<msg bigheadimgurl=\"http://wx.qlogo.cn/mmhead/Q3auHgzwzM78Xle9vWR67KwFE4rYyS4fTatVoOdBBZVwkF7V7ef1EQ/0\" smallheadimgurl=\"http://wx.qlogo.cn/mmhead/Q3auHgzwzM78Xle9vWR67KwFE4rYyS4fTatVoOdBBZVwkF7V7ef1EQ/132\" username=\"v3_020b3826fd030100000000008a6b1ac5d4815d000000501ea9a3dba12f95f6b60a0536a1adb6706338dc845596ad896873f87974f56d4037fdc2e1779801409492ec155b0c14a07bd117274baf3a862e7e@stranger\" nickname=\"某单位\" fullpy=\"beijingjiaotongdaxueyanjiusheng\" shortpy=\"\" alias=\"\" imagestatus=\"3\" scene=\"17\" province=\"北京\" city=\"海淀\" sign=\"\" sex=\"0\" certflag=\"24\" certinfo=\"某大学\" brandIconUrl=\"http://mmbiz.qpic.cn/mmbiz_png/ictIjWYJoGuM5ZKSzCTNIKLFsfmFhmZZNRfw8CUCbIA3uZsO4RZvzS2NgNccrVet6dSGUvGLRaWviaEDgaW1RstA/0?wx_fmt=png\" brandHomeUrl=\"\" brandSubscriptConfigUrl=\"{&quot;urls&quot;:[{&quot;title&quot;:&quot;查看历史消息&quot;,&quot;url&quot;:&quot;http:\\/\\/mp.weixin.qq.com\\/mp\\/getmasssendmsg?__biz=MzA5MTA2NDAxNA==#wechat_webview_type=1&amp;wechat_redirect&quot;,&quot;title_key&quot;:&quot;__mp_wording__brandinfo_history_massmsg&quot;}]}\" brandFlags=\"0\" regionCode=\"CN\" brandType=\"0\" biznamecardinfo=\"CmRDaHZsakpma3Vxemt1cVRwZ0pybHBLZmxyYWJub0pUbnFiYm5sSjhRR0JvQUlnRXhLS1hMZ2RRR01nOW5hRjh3TkRGaVpEUmtNVEZoWVdZNkRHSTNjR1U1ZFhCMWJHZDFWdz09EnhBQWZtUGN3RUFBQUJBQUFBQUFBT0ovcDlKQldGY05KL3BXV0FhaUFBQUFCdEVOc05PUStDMjQ1ZDJwcUtOUEJRZlFqVXdPZHROUkJoWHNNOXhPdGExbHBEbmRLdG82WVBLMzFqSU5UbGVYUGJYYVRrNzFQWVZMQk0=\" antispamticket=\"v4_000b708f0b0400000100000000001fd82dbe309eb79c75b0ab65806a1000000050ded0b020927e3c97896a09d47e6e9eb5ab9a6f70c94583cc6b5c2043cc741d8f011095d380cbdf62a83a077ae78b4a15309e111ed0b9f83b4d2e6dfc07dd99a3f372cf4eb28706bf70dd2618b92a14950f6c210ed517bcb3acb61ac488d35ead8d1d844f314ece7ef0d56b04b4f5319915ea36a13ef7ce42a4e17d1defc85ba22fc84d7cd5fae78fc2f5d3deca9d0ab0ad25bebe9b8afb9c11da91f82cadaaedaf82d1c3fcdffb3510ba8ac0c3163f0217b0f30840860a23717eb1488d5b5f8f6cf45da497f2b77e63887fec16001d34e5c6d8384992da572bf6890f2b1c8f9c82b5f0033bd6f5a4e13750f5399c349f11935c4248f6@stranger\" />",
+    "compress_content": "",
+    "sender_username": "GOD-is-love-Jesue",
+    "table_name": "Msg_test",
+    "session": "1234567899@chatroom"
+  }
+}

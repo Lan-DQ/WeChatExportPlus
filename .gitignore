@@ -1,0 +1,36 @@
+# ── 构建产物（由 build_dist_plus.py 生成，不进仓库）──
+/dist/
+/build/
+*.spec
+
+# ── 开发期临时链接（dev_setup.py 创建，指向本机原版 WeChatExport）──
+/dll/
+/runtime/
+/electron/
+/resources/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# ── 本地凭据 / 密钥（绝不提交）──
+.token
+*.token
+gh_token*
+key.txt
+key_status.txt
+
+# ── 导出的聊天记录（含隐私，绝不提交）──
+导出_*/
+*_图片/
+*.jsonl
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
