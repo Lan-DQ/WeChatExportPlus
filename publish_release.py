@@ -161,7 +161,12 @@ def build_zip(release_dir, out_zip):
     return out_zip
 
 
-def git_publish(repo, token, branch='main', commit_msg=''):
+def git_publish(owner, rname, token, branch='main', commit_msg=''):
+    """提交并把源码推到 owner/rname。
+
+    注意：remote URL 里带 token，属于敏感信息。推送结束后（无论成败）
+    都会把它换回不带凭据的地址，避免 token 长期留在 .git/config 里。
+    """
     log('\n[1] 提交源码到 git')
     if not os.path.isdir(os.path.join(ROOT, '.git')):
         run(['git', 'init', '-b', branch])
@@ -175,22 +180,35 @@ def git_publish(repo, token, branch='main', commit_msg=''):
     else:
         log('  没有需要提交的改动')
 
-    owner = repo.split('/')[0]
-    remote = f'https://{owner}:{token}@github.com/{repo}.git'
-    remotes = run(['git', 'remote'], check=False).stdout.split()
-    if 'origin' in remotes:
-        run(['git', 'remote', 'set-url', 'origin', remote])
+    clean_url = f'https://github.com/{owner}/{rname}.git'
+    if 'origin' in run(['git', 'remote'], check=False).stdout.split():
+        run(['git', 'remote', 'set-url', 'origin', clean_url])
     else:
-        run(['git', 'remote', 'add', 'origin', remote])
-    log(f'  推送到 {repo} ({branch})')
-    r = run(['git', 'push', '-u', 'origin', branch], check=False)
-    if r.returncode != 0:
-        out = (r.stdout or '')
-        if 'src refspec' in out or 'has no commits' in out:
-            raise SystemExit(f'推送失败:\n{out[:600]}')
+        run(['git', 'remote', 'add', 'origin', clean_url])
+
+    # token 通过环境变量交给 git，不写进 remote URL、不落到 .git/config、
+    # 也不出现在任何错误输出里（曾经因为把 token 拼进 URL，失败时被打印出来）。
+    helper = ('!f(){ test "$1" = get && printf "username=%s\\npassword=%s\\n" '
+              '"x-access-token" "$WE_GH_TOKEN"; }; f')
+    env = dict(os.environ, WE_GH_TOKEN=token)
+    log(f'  推送到 {owner}/{rname} ({branch})')
+    try:
+        r = subprocess.run(
+            ['git', '-c', f'credential.helper={helper}', 'push', '-u', 'origin', branch],
+            cwd=ROOT, text=True, encoding='utf-8', errors='replace',
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        ok = r.returncode == 0
+        out = r.stdout or ''
+    except Exception as e:
+        ok, out = False, str(e)
+
+    if not ok:
+        # 万一 git 把凭据回显出来，这里再做一次兜底打码
+        safe = out.replace(token, '***')[:600]
         raise SystemExit(
-            f'推送失败:\n{out[:600]}\n\n'
-            '常见原因：token 权限不足（需要 repo 权限）、仓库不存在、或网络中断。')
+            f'推送失败:\n{safe}\n\n'
+            '常见原因：网络中断（本机到 GitHub 偶发不通，重试即可）、'
+            'token 权限不足（需 repo）、或仓库地址不对。')
     log('  推送成功')
 
 
@@ -247,7 +265,7 @@ def main():
         log('  已创建')
 
     if not args.skip_git:
-        git_publish(args.repo, token)
+        git_publish(owner, rname, token)
 
     log('\n[2] 准备发布包')
     zip_path = args.zip
