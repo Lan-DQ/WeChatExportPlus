@@ -143,21 +143,32 @@ def upload_asset(upload_url, token, filepath, name=None, retries=3):
 
 
 def build_zip(release_dir, out_zip):
-    """用最小依赖的方式打包（调用 PowerShell 的 Compress-Archive，条目名 UTF-8 正确）。"""
+    """调用 PowerShell 的 Compress-Archive 打包。
+
+    用 Compress-Archive 而不是 tar：tar(bsdtar) 会把中文条目名写成乱码，
+    而这个包里有「启动工具.bat」「使用说明.md」等中文文件名。
+    注意 PowerShell 的 -Command 不会把后续参数填进 $args，
+    所以路径必须直接拼进脚本文本里（用单引号包裹并转义内部单引号）。
+    """
     if os.path.exists(out_zip):
         os.remove(out_zip)
     if not os.path.isdir(release_dir):
         raise SystemExit(
             f'找不到发布目录: {release_dir}\n'
             '请先运行 python build_dist_plus.py，或用 --release-dir 指定。')
-    log(f'  打包 {release_dir} -> {out_zip}')
-    ps = ('Compress-Archive -Path (Join-Path $args[0] "*") '
-          '-DestinationPath $args[1] -CompressionLevel Optimal -ErrorAction Stop')
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', ps,
-                        release_dir, out_zip],
-                       capture_output=True, text=True)
+    log(f'  打包 {os.path.basename(release_dir)} -> {os.path.basename(out_zip)}')
+
+    def q(p):
+        return "'" + p.replace("'", "''") + "'"
+
+    ps = (f"$ErrorActionPreference='Stop'; "
+          f"Compress-Archive -Path (Join-Path {q(release_dir)} '*') "
+          f"-DestinationPath {q(out_zip)} -CompressionLevel Optimal")
+    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
     if r.returncode != 0 or not os.path.exists(out_zip):
-        raise SystemExit(f'打包失败:\n{r.stderr[:800]}')
+        raise SystemExit(f'打包失败:\n{(r.stderr or r.stdout or "")[:800]}')
+    log(f'  打包完成 {os.path.getsize(out_zip) / 1048576:.0f} MB')
     return out_zip
 
 
