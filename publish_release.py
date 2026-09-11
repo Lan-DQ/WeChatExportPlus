@@ -56,23 +56,33 @@ def run(cmd, cwd=None, check=True, capture=True):
 
 
 def read_token():
+    """按优先级找 token：环境变量 → 本目录任意 *.token / .token 文件。
+
+    允许任意 `*.token` 命名（例如 ME.token、GH.token），
+    免得因为文件名差一个点就卡住。
+    """
     for env in ('GH_TOKEN', 'GITHUB_TOKEN'):
         v = os.environ.get(env, '').strip()
         if v:
             return v, env
-    p = os.path.join(ROOT, '.token')
-    if os.path.exists(p):
-        with open(p, encoding='utf-8') as f:
-            v = f.read().strip()
-        if v:
-            return v, '.token'
+    cands = ['.token']
+    for p in sorted(os.listdir(ROOT)):
+        if p.endswith('.token') and p not in cands:
+            cands.append(p)
+    for name in cands:
+        p = os.path.join(ROOT, name)
+        if os.path.isfile(p):
+            with open(p, encoding='utf-8-sig', errors='replace') as f:
+                v = f.read().strip()
+            if v:
+                return v, name
     raise SystemExit(
-        '找不到 GitHub token。\n'
-        '请任选一种方式：\n'
-        '  1) 把 token 写进本目录的 .token 文件（已加入 .gitignore）\n'
+        '找不到 GitHub token。请任选一种方式：\n'
+        '  1) 在本目录放一个 token 文件，文件名以 .token 结尾\n'
+        '     （例如 ME.token），内容只有一行 token\n'
         '  2) 设置环境变量 GH_TOKEN\n'
         'token 生成地址：https://github.com/settings/tokens\n'
-        '（classic token，勾选 repo；只发公开仓库的话 public_repo 就够）')
+        '  选 classic，勾选 repo（只发公开仓库勾 public_repo 也可）')
 
 
 def api(method, path, token, data=None, content_type='application/json', timeout=120):
