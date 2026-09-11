@@ -1,0 +1,88 @@
+如何发布到 GitHub Releases
+==========================
+
+只需要一次性的 token 配置，之后 `python publish_release.py` 一条命令搞定。
+
+
+第一步：生成 token
+------------------
+1. 打开 https://github.com/settings/tokens
+2. 点 "Generate new token" → 选 "Generate new token (classic)"
+   （不要选 Fine-grained，classic 更省事）
+3. Note 随便填，比如：wechat-export-publish
+4. Expiration 建议选 7 days（用完可以立刻撤销，不用长期留着）
+5. 勾选权限：**repo**（整块勾上即可）
+   - 只发公开仓库的话，勾 public_repo 就够
+6. 点最下面 "Generate token"，复制那串 ghp_ 开头的字符
+   ⚠️ 这串只显示一次，关掉页面就看不到了
+
+
+第二步：把 token 交给脚本（二选一）
+-----------------------------------
+方式 A（推荐）：在本目录新建一个名为  .token  的文件
+    文件名就是 .token（前面有个点，没有扩展名）
+    内容只有一行：你的 token
+    注意保存时编码选 UTF-8、不要带 BOM、末尾不要有多余空行
+
+方式 B：设环境变量
+    PowerShell:  $env:GH_TOKEN = "ghp_xxxxxxxx"
+    或永久设置:  setx GH_TOKEN "ghp_xxxxxxxx"
+
+本目录的 .gitignore 已确认会排除 .token，不会被提交到仓库。
+（如果你不放心，发布完成后直接删掉这个文件即可。）
+
+
+第三步：运行发布
+----------------
+    cd C:\My_GongJu\grab\WeChatExportPlus
+    python publish_release.py --repo WeChatExportPlus --tag v2.0.0 --create-repo
+
+脚本会依次做：
+    1. 用 token 确认身份（用户名自动识别，不用手打）
+    2. 仓库不存在则创建（公开）
+    3. 提交并推送源码（约 1 MB，很快）
+    4. 打包发布目录为 zip（约 224 MB）
+    5. 创建 Release 并上传 zip 附件
+    6. 打印下载直链
+
+常用可选参数：
+    --private        建私有仓库（注意：私有仓库的 Release 附件需要登录才能下载）
+    --skip-git       跳过提交推送，只做 Release（重传附件时用）
+    --zip <路径>     指定已有的 zip，不重新打包
+    --tag v2.0.1     发新版本
+
+
+第四步：把链接发给朋友
+----------------------
+脚本最后会打印形如下面的直链：
+
+    https://github.com/Lan-DQ/WeChatExportPlus/releases/download/v2.0.0/WeChatExportPlus_v2.0.0_win64.zip
+
+以及一个"永远指向最新版"的页面（推荐给朋友这个）：
+
+    https://github.com/Lan-DQ/WeChatExportPlus/releases/latest
+
+
+以后要发新版本
+--------------
+    python publish_release.py --repo WeChatExportPlus --tag v2.0.1
+
+tag 换掉即可，旧版本的下载链接依然有效。
+
+
+常见问题
+--------
+* 403 Resource not accessible by personal access token
+  → token 没勾 repo 权限，或者勾错成了 Fine-grained 但没给仓库写权限。
+
+* 推送失败 / 连不上 github.com
+  → 本机网络对 GitHub 不稳定，重试即可；大文件上传中断也可以重跑
+    （加 --skip-git 跳过 git 步骤）。
+
+* 附件已存在同名
+  → 脚本会自动删掉旧的再传。
+
+* 我不想把源码公开
+  → 加 --private。但朋友下载就会需要 GitHub 账号登录，
+    达不到"点链接直接下载"的效果。折中办法：源码私有，
+    另建一个空的公开仓库专门放 Release 附件。

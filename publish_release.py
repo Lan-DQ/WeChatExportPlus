@@ -189,7 +189,8 @@ def main():
     import urllib.parse  # noqa: F401  （上传时用到）
 
     ap = argparse.ArgumentParser()
-    ap.add_argument('--repo', required=True, help='用户名/仓库名')
+    ap.add_argument('--repo', default='WeChatExportPlus',
+                    help='仓库名，或 用户名/仓库名；只给仓库名时用户名由 token 自动识别')
     ap.add_argument('--tag', default='v2.0.0', help='版本 tag，如 v2.0.0')
     ap.add_argument('--name', default='', help='Release 标题')
     ap.add_argument('--release-dir', default=DEFAULT_RELEASE_DIR)
@@ -202,13 +203,19 @@ def main():
 
     token, src = read_token()
     log(f'已读取 token（来源：{src}）')
+
+    # 先用 token 确认身份，再决定 owner —— 免去用户手打用户名的麻烦与出错
+    me = api('GET', '/user', token)
+    my_login = me.get('login') or ''
+    log(f'登录身份: {my_login}')
+
     owner, _, rname = args.repo.partition('/')
     if not rname:
-        raise SystemExit('--repo 格式应为 用户名/仓库名')
-
-    # 确认 token 有效
-    me = api('GET', '/user', token)
-    log(f"登录身份: {me.get('login')}")
+        # 只给了仓库名：owner 一律用 token 对应的账号，避免推错地方
+        rname, owner = owner, my_login
+    if owner.lower() != my_login.lower():
+        log(f'注意：owner({owner}) 与 token 账号({my_login}) 不一致，'
+            f'需要该组织的写权限才能继续。')
 
     # 仓库不存在时按需创建
     exists = True
@@ -220,8 +227,8 @@ def main():
         if not args.create_repo:
             raise SystemExit(
                 f'仓库 {owner}/{rname} 不存在或无权访问。\n'
-                '加 --create-repo 让脚本自动创建（默认私有，公开加 --private 之外的默认值自行确认）。')
-        log(f'创建仓库 {owner}/{rname} …')
+                '加 --create-repo 让脚本自动创建。')
+        log(f'创建仓库 {owner}/{rname}（{"私有" if args.private else "公开"}）…')
         api('POST', '/user/repos', token, {
             'name': rname, 'private': bool(args.private),
             'description': '微信聊天记录批量导出工具（批量勾选 + 单文件 Markdown 导出，适合喂给 AI）',
