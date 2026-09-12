@@ -12,6 +12,13 @@ from PIL import Image, ImageDraw, ImageTk
 import ui_theme as T
 
 
+# tk 事件 type 是数字常量（见 tkinter.EventType），映射成语义名供控件判断。
+_EVENT_NAMES = {
+    4: 'ButtonPress-1', 5: 'ButtonRelease-1', 6: 'Motion', 7: 'Enter', 8: 'Leave',
+    22: 'Configure',
+}
+
+
 class Surface:
     """整个窗口的绘制表面：负责背景图、面板合成缓存、尺寸与重绘。
 
@@ -32,7 +39,74 @@ class Surface:
         self.size = (0, 0)
         self._pil_bg = None
         self._anim = None
+        self._input_owners = []     # 注册的输入消费者（按注册顺序）
+        self._modal = None          # 当前独占输入的控件（如展开的下拉框）
+        self._install_input_pump()
         self.redraw_bg()
+
+    # ── 输入分发 ──
+    #
+    # 多个自绘控件都绑在同一个 Canvas 上，靠 tk 的绑定顺序决定谁先收到事件，
+    # 非常脆弱（后来绑的控件会被先绑的 break 掉）。这里改成集中分发：
+    #   1. 有 modal（展开的下拉框等）时，只给它处理；
+    #   2. 否则按注册顺序询问各控件，谁命中谁处理并停止。
+    # 控件只需实现 on_input(event) 返回 True 表示已消费。
+
+    def register_input(self, owner):
+        if owner not in self._input_owners:
+            self._input_owners.append(owner)
+
+    def unregister_input(self, owner):
+        if owner in self._input_owners:
+            self._input_owners.remove(owner)
+        if self._modal is owner:
+            self._modal = None
+
+    def set_modal(self, owner):
+        self._modal = owner
+
+    def clear_modal(self, owner=None):
+        if owner is None or self._modal is owner:
+            self._modal = None
+
+    def dispatch_input(self, event):
+        """把 tk 事件转成语义名后分发给控件。
+
+        ⚠️ 坑：tk 的 event.type 是**数字常量**（4=ButtonPress, 5=ButtonRelease,
+        6=Motion, 7=Enter, 8=Leave …），不是 'Motion' 这种字符串。
+        早期直接拿它和字符串比较，结果所有控件都判定为"不是我的事件"，
+        表现为鼠标移上去没反应、点了没动静。这里统一映射成语义名。
+        """
+        name = _EVENT_NAMES.get(event.type)
+        if name is None:
+            return None
+        event.semantic = name
+        if self._modal is not None:
+            try:
+                if self._modal.on_input(event):
+                    return 'break'
+            except Exception:
+                self._modal = None
+            return None
+        for owner in list(self._input_owners):
+            try:
+                if owner.on_input(event):
+                    return 'break'
+            except Exception:
+                pass
+        return None
+
+    def _install_input_pump(self):
+        cv = self.canvas
+
+        def handler(event):
+            return self.dispatch_input(event)
+
+        cv.bind('<Motion>', handler, add='+')
+        cv.bind('<Button-1>', handler, add='+')
+        cv.bind('<ButtonRelease-1>', handler, add='+')
+        cv.bind('<MouseWheel>', handler, add='+')
+        cv.bind('<Leave>', handler, add='+')
 
     # ── 动画 ──
 
@@ -138,6 +212,8 @@ class Button:
         # 动画进度：0=静息 1=悬停；按下时另外叠一层暗化
         self._hover_t = 0.0
         self._press_t = 0.0
+        self._hovering = False
+        self._pressed_inside = False
         self._anim_key = f'anim_{self.tags}'
         self.draw()
 
@@ -197,11 +273,60 @@ class Button:
             fill=th['accent_text'], font=(self.sf.font, self.font_size, 'bold'),
             tags=self.tags)]
 
-        cv.tag_bind(self.tags, '<Enter>', self._on_enter)
-        cv.tag_bind(self.tags, '<Leave>', self._on_leave)
-        cv.tag_bind(self.tags, '<ButtonPress-1>', self._on_press)
-        cv.tag_bind(self.tags, '<ButtonRelease-1>', self._on_release)
+        # 接入 Surface 的统一输入分发（不用 tag_bind）
+        self.sf.register_input(self)
         self._paint()
+
+    def on_input(self, e):
+        """统一入口。返回 True 表示已消费。"""
+        if self.state == 'disabled':
+            return False
+        et = getattr(e, 'semantic', e.type)
+        if et == 'Motion':
+            inside = self._in_bounds(e.x, e.y)
+            if inside != self._hovering:
+                self._hovering = inside
+                if inside:
+                    self.sf.canvas.configure(cursor='hand2')
+                    self._animate('_hover_t', 1.0)
+                else:
+                    self.sf.canvas.configure(cursor='')
+                    self._animate('_hover_t', 0.0, 0.2)
+                    self._animate('_press_t', 0.0, 0.1, '_p')
+                    self._pressed_inside = False
+                self._raise()
+            return False
+        if et in ('Button-1', 'ButtonPress-1'):
+            if self._in_bounds(e.x, e.y):
+                self._pressed_inside = True
+                self._animate('_press_t', 1.0, 0.06, '_p')
+                self._raise()
+                return True
+            return False
+        if et == 'ButtonRelease-1':
+            was = self._pressed_inside and self._press_t > 0.15
+            self._pressed_inside = False
+            self._animate('_press_t', 0.0, 0.12, '_p')
+            if was and self.command:
+                self.command()
+                return True
+            return False
+        if et == 'Leave':
+            if self._hovering:
+                self._hovering = False
+                self.sf.canvas.configure(cursor='')
+                self._animate('_hover_t', 0.0, 0.2)
+                self._animate('_press_t', 0.0, 0.1, '_p')
+                self._raise()
+            return False
+        return False
+
+    def _in_bounds(self, x, y):
+        return (self.x <= x <= self.x + self.w
+                and self.y <= y <= self.y + self.h)
+
+    def unbind(self):
+        self.sf.unregister_input(self)
 
     # ── 重绘（只换图片与颜色，不重建图元）──
 
@@ -291,34 +416,10 @@ class Button:
         self.sf.anim.animate(key, dur or self.hover_dur, 'out_cubic', frame)
 
     # ── 事件 ──
-
-    def _on_enter(self, _e):
-        if self.state == 'disabled':
-            return
-        self.sf.canvas.configure(cursor='hand2')
-        self._animate('_hover_t', 1.0)
-        self._raise()
-
-    def _on_leave(self, _e):
-        self.sf.canvas.configure(cursor='')
-        self._animate('_hover_t', 0.0, 0.2)
-        self._animate('_press_t', 0.0, 0.1, '_p')
-        self._raise()
-
-    def _on_press(self, _e):
-        if self.state == 'disabled':
-            return
-        self._animate('_press_t', 1.0, 0.06, '_p')
-        self._raise()
-
-    def _on_release(self, _e):
-        if self.state == 'disabled':
-            return
-        was = self._press_t > 0.15
-        self._animate('_press_t', 0.0, 0.12, '_p')
-        self._raise()
-        if was and self.command:
-            self.command()
+    # 注：旧的 _on_enter/_on_leave/_on_press/_on_release（tag_bind 版）已删除。
+    # 它们的问题是把事件挂在 tag 上，而 draw() 每次都 delete+重建图元，
+    # 等于把 Tk 正在派发事件的那个图元删掉 —— 表现为"按下有动画、弹起丢失、
+    # 点了没反应"。现在统一走 on_input()（见上）。
 
     def _raise(self):
         self.sf.canvas.tag_raise(self.tags)
@@ -453,19 +554,63 @@ class CheckList:
 
     # ── 交互 ──
 
+    CHECKBOX_HIT = 40      # 行左侧这么多像素内算"点在勾选框上"
+
     def _bind(self):
-        cv = self.sf.canvas
-        cv.tag_bind('listbody', '<Motion>', self._on_motion)
-        cv.tag_bind('listbody', '<Leave>', self._on_leave)
-        cv.tag_bind('listbody', '<Button-1>', self._on_click)
-        cv.tag_bind('listbody', '<Double-Button-1>', self._on_double)
-        # 注意：滚轮不能挂在 tag 上（Tk 只允许 tag_bind 用 key/button/motion/enter/leave），
-        # 只能绑在 widget 上，然后在回调里判断指针是否落在列表区域内。
-        cv.bind('<MouseWheel>', self._on_wheel, add='+')
-        cv.bind('<Button-4>', lambda e: self._wheel_at(e, -1), add='+')
-        cv.bind('<Button-5>', lambda e: self._wheel_at(e, 1), add='+')
+        """向 Surface 注册自己为输入消费者（不再各自 bind 到 Canvas）。
+
+        早期做法是每个控件各自 cv.bind(...)，靠绑定顺序决定谁先收到事件，
+        结果 CheckList 先绑定就会把下拉框的点击 break 掉。
+        现在由 Surface 集中分发，顺序和消费权都是明确的。
+        """
+        self.sf.register_input(self)
+
+    def unbind(self):
+        """注销输入注册。页面切换时由 App 调用，否则旧实例会残留继续收事件。"""
+        self.sf.unregister_input(self)
+
+    def on_input(self, e):
+        """统一入口：返回 True 表示已消费该事件。"""
+        et = getattr(e, 'semantic', e.type)
+        if et == 'Motion':
+            self._on_motion(e)
+            return False
+        if et == 'Leave':
+            self._on_leave(e)
+            return False
+        if et == 'ButtonPress-1':
+            return self._on_click(e) == 'break'
+        if et in ('ButtonRelease-1',):
+            self._scroll_release(e)
+            return False
+        if et in ('MouseWheel', 'Button-4', 'Button-5'):
+            if self._inside(e.x, e.y):
+                if et == 'MouseWheel':
+                    self._wheel(-1 if e.delta > 0 else 1)
+                else:
+                    self._wheel(-1 if et == 'Button-4' else 1)
+                return True
+        return False
+
+    def _scroll_press(self, e):
+        g = self._thumb_geom()
+        if not g:
+            return None
+        sx, ty1, ty2, ty, th, track_h = g
+        if not (self.x + self.w - 16 <= e.x <= self.x + self.w):
+            return None
+        if ty <= e.y <= ty + th:
+            self._drag_off = e.y - ty
+        else:
+            self._drag_off = th / 2
+            self._scroll_to_y(e.y - self._drag_off, ty1, track_h, th)
+        return 'break'
 
     def _inside(self, x, y):
+        return (self.x <= x <= self.x + self.w
+                and self.y <= y <= self.y + self.h)
+
+    def _inside_body(self, x, y):
         return (self.x <= x <= self.x + self.w
                 and self.y + self.HEADER_H <= y <= self.y + self.h)
 
@@ -476,13 +621,17 @@ class CheckList:
         return idx if 0 <= idx < len(self.view) else -1
 
     def _on_motion(self, e):
+        # 没落在列表里就不消费事件，让后面的控件（如下拉框）自己处理
+        if not self._inside_body(e.x, e.y):
+            if self.hover_row != -1:
+                old = self.hover_row
+                self.hover_row = -1
+                self._repaint_rows([old])
+            return None
         i = self._row_at(e.y)
         if i != self.hover_row:
             old = self.hover_row
             self.hover_row = i
-            # 只重绘受影响的两行，不整表重绘。
-            # 早期版本这里调 draw()，整表 60 行的文字 + 头像 PhotoImage 全部重建，
-            # 实测 10.6 ms/次（逼近 16.7ms 一帧预算，鼠标划过就卡）。
             self._repaint_rows([old, i])
 
     def _on_leave(self, _e):
@@ -574,20 +723,100 @@ class CheckList:
                 self._avatar_cache.pop(next(iter(self._avatar_cache)))
         return self._avatar_cache[key]
 
-    def _on_click(self, e):
+    def _hit(self, e):
+        """判断点在哪儿：返回 (行下标, 'check'|'row'|'')。"""
+        if not self._inside_body(e.x, e.y):
+            return -1, ''
         i = self._row_at(e.y)
         if i < 0:
-            return
-        self.toggle_index(self.view[i])
+            return -1, ''
+        # 左侧区域算勾选框
+        if e.x <= self.x + self.CHECKBOX_HIT:
+            return i, 'check'
+        return i, 'row'
+
+    def _on_click(self, e):
+        """点左侧方块 → 勾选/取消；点该行其它位置 → 打开会话详情。
+
+        ⚠️ 关键：没命中列表区域时必须返回 None（不消费事件）。
+        早期这里无条件 return 'break'，而 Tk 遇到 'break' 会**中止后续所有
+        处理器** —— 于是绑在它之后的下拉框永远收不到点击，表现为
+        "鼠标移到导出格式上没反应、点了像卡死"。实测日志：
+            [CheckList._on_click] (156,137) 返回='break'   ← 明明没点到行
+        """
+        i, where = self._hit(e)
+        if i < 0:
+            return None
+        if where == 'check':
+            self.toggle_index(i)
+        elif where == 'row' and self.on_open:
+            self.on_open(self.items[i])
+        return 'break'
 
     def _on_double(self, e):
-        i = self._row_at(e.y)
-        if i >= 0 and self.on_open:
-            self.on_open(self.items[self.view[i]])
+        i, where = self._hit(e)
+        if i >= 0 and where == 'row' and self.on_open:
+            self.on_open(self.items[i])
+            return 'break'
+        return None
 
     def _wheel_at(self, e, d):
         if self._inside(e.x, e.y):
             self._wheel(d)
+
+    # ── 滚动条拖动 ──
+
+    def _thumb_geom(self):
+        """返回滚动条轨道与滑块的几何 (x, track_y1, track_y2, thumb_y, thumb_h)。"""
+        total = len(self.view)
+        y0 = self.y + self.HEADER_H
+        track_y1, track_y2 = y0 + 4, self.y + self.h - 8
+        track_h = max(1, track_y2 - track_y1)
+        if total <= self.visible_rows:
+            return None
+        thumb_h = max(28, track_h * self.visible_rows / total)
+        maxs = total - self.visible_rows
+        ty = track_y1 + (track_h - thumb_h) * (self.scroll / maxs if maxs else 0)
+        return (self.x + self.w - 8, track_y1, track_y2, ty, thumb_h, track_h)
+
+    def _scroll_press(self, e):
+        g = self._thumb_geom()
+        if not g:
+            return
+        sx, ty1, ty2, ty, th, track_h = g
+        # 点在滚动条竖条上（含左右 12px 容差）
+        if not (self.x + self.w - 16 <= e.x <= self.x + self.w):
+            return
+        if ty <= e.y <= ty + th:
+            self._drag_off = e.y - ty          # 抓住滑块拖动
+        else:
+            self._drag_off = th / 2            # 点轨道空白：跳到该位置
+            self._scroll_to_y(e.y - self._drag_off, ty1, track_h, th)
+        return 'break'
+
+    def _scroll_drag(self, e):
+        if getattr(self, '_drag_off', None) is None:
+            return
+        g = self._thumb_geom()
+        if not g:
+            return
+        sx, ty1, ty2, ty, th, track_h = g
+        self._scroll_to_y(e.y - self._drag_off, ty1, track_h, th)
+        return 'break'
+
+    def _scroll_release(self, _e):
+        self._drag_off = None
+
+    def _scroll_to_y(self, ty, track_y1, track_h, thumb_h):
+        total = len(self.view)
+        maxs = total - self.visible_rows
+        if maxs <= 0:
+            return
+        frac = (ty - track_y1) / max(1, track_h - thumb_h)
+        ns = int(round(max(0.0, min(1.0, frac)) * maxs))
+        if ns != self.scroll:
+            self.scroll = ns
+            self.draw()
 
     def _on_wheel(self, e):
         if self._inside(e.x, e.y):
@@ -680,10 +909,42 @@ class Checkbox:
                                       tags=(self.tag,))]
         self._items = it
         self._box_photo = None
-        cv.tag_bind(self.tag, '<Enter>', self._enter)
-        cv.tag_bind(self.tag, '<Leave>', self._leave)
-        cv.tag_bind(self.tag, '<Button-1>', self._click)
+        # 接入统一输入分发（不用 tag_bind，避免图元重建后事件断裂）
+        self.sf.register_input(self)
         self._paint()
+
+    def on_input(self, e):
+        et = getattr(e, 'semantic', e.type)
+        if et == 'Motion':
+            inside = self._in_bounds(e.x, e.y)
+            if inside != self._hover:
+                self._hover = inside
+                if inside:
+                    self.sf.canvas.configure(cursor='hand2')
+                else:
+                    self.sf.canvas.configure(cursor='')
+                self._paint()
+            return False
+        if et in ('Button-1', 'ButtonPress-1'):
+            if self._in_bounds(e.x, e.y):
+                self.toggle()
+                return True
+            return False
+        if et == 'Leave':
+            if self._hover:
+                self._hover = False
+                self.sf.canvas.configure(cursor='')
+                self._paint()
+            return False
+        return False
+
+    def _in_bounds(self, x, y):
+        # 命中区覆盖方框 + 右侧文字，避免文字区域点不动
+        return (self.x <= x <= self.x + self.w
+                and self.y - 4 <= y <= self.y + self.box + 4)
+
+    def unbind(self):
+        self.sf.unregister_input(self)
 
     def _paint(self):
         cv, th = self.sf.canvas, self.sf.theme
@@ -719,19 +980,6 @@ class Checkbox:
                           p2[0] + (p3[0] - p2[0]) * k2, p2[1] + (p3[1] - p2[1]) * k2)
         for i in self._items['label']:
             cv.itemconfigure(i, fill=th['text'] if self._hover else th['text_dim'])
-
-    def _enter(self, _e):
-        self._hover = True
-        self.sf.canvas.configure(cursor='hand2')
-        self._paint()
-
-    def _leave(self, _e):
-        self._hover = False
-        self.sf.canvas.configure(cursor='')
-        self._paint()
-
-    def _click(self, _e):
-        self.toggle()
 
     def toggle(self):
         self.value = not self.value
@@ -821,31 +1069,110 @@ class Dropdown:
         self.draw()          # 必须显式画一次，否则控件是隐形的
 
     def bind(self):
-        cv = self.sf.canvas
-        cv.tag_bind(self.tag, '<Enter>', self._enter)
-        cv.tag_bind(self.tag, '<Leave>', self._leave)
-        cv.tag_bind(self.tag, '<Button-1>', self._toggle)
+        """注册为输入消费者；展开时独占输入（modal）。
 
-    def _enter(self, _e):
-        if not self.open:
-            self.hover_box_top = True
-            self.sf.canvas.configure(cursor='hand2')
+        展开的弹层会和下方列表/按钮区域重叠，如果让列表先去判命中，
+        点击选项会被列表 break 掉 —— 所以展开期间由 Surface 把输入
+        全部转给本控件，收起后交还。
+        """
+        self.sf.register_input(self)
+
+    def on_input(self, e):
+        et = getattr(e, 'semantic', e.type)
+        if et == 'Motion':
+            self._on_motion(e)
+            return False
+        if et in ('Button-1', 'ButtonPress-1'):
+            return self._on_press(e) == 'break'
+        if et == 'Leave':
+            self._on_leave_global(e)
+            return False
+        return False
+
+    # ── 几何判定 ──
+
+    def _in_box(self, x, y):
+        return (self.x <= x <= self.x + self.w
+                and self.y <= y <= self.y + self.h)
+
+    def _in_list(self, x, y):
+        if not self.open or not self._list_geom:
+            return False
+        ly, ih, n = self._list_geom
+        return (self.x <= x <= self.x + self.w and ly <= y <= ly + 4 + n * ih)
+
+    def _option_at(self, x, y):
+        if not self._in_list(x, y):
+            return -1
+        ly, ih, n = self._list_geom
+        i = int((y - ly - 4) // ih)
+        return i if 0 <= i < n else -1
+
+    def _on_motion(self, e):
+        if self._in_box(e.x, e.y):
+            if not self.open and not self.hover_box_top:
+                self.hover_box_top = True
+                self.sf.canvas.configure(cursor='hand2')
+                self.draw()
+            return
+        if self.open:
+            i = self._option_at(e.x, e.y)
+            if i != self.hover:
+                self.hover = i
+                self._redraw_list_only()
+            self.sf.canvas.configure(cursor='hand2' if i >= 0 else '')
+            return
+        if self.hover_box_top:
+            self.hover_box_top = False
+            self.sf.canvas.configure(cursor='')
             self.draw()
 
-    def _leave(self, _e):
-        self.hover_box_top = False
-        if not self.open:
+    def _on_leave_global(self, _e):
+        """鼠标离开整个画布：复位悬停态并收起弹层。"""
+        if self.hover_box_top:
+            self.hover_box_top = False
             self.sf.canvas.configure(cursor='')
-        self.draw()
+            if not self.open:
+                self.draw()
 
-    def _toggle(self, _e):
+    def _on_press(self, e):
+        # 展开状态下遇到任何点击都吃掉（弹层是模态的）：点选项=选中，
+        # 点别处=收起。这样不会被下方列表抢走事件。
+        if self.open:
+            i = self._option_at(e.x, e.y)
+            if i >= 0:
+                self._pick_index(i)
+            else:
+                self.open = False
+                self.hover = -1
+                self.sf.clear_modal(self)
+                self.draw()
+                self.sf.canvas.configure(cursor='')
+            return 'break'
+        if self._in_box(e.x, e.y):
+            self._toggle(e)
+            return 'break'
+        return None
+
+    def _pick_index(self, i):
+        self.value = self.options[i]
+        self.open = False
+        self.hover = -1
+        self.sf.clear_modal(self)
+        self.draw()
+        self.sf.canvas.configure(cursor='')
+        if self.on_change:
+            self.on_change(self.value)
+
+    def _toggle(self, _e=None):
         self.open = not self.open
+        self.hover = -1
         self.draw()
         if self.open:
-            self.sf.canvas.tag_raise(self.tag)
+            self.sf.set_modal(self)
         else:
+            self.sf.clear_modal(self)
             self.sf.canvas.configure(cursor='')
-        self.bind()
 
     def set_value(self, v):
         if v in self.options:
@@ -858,15 +1185,20 @@ class Dropdown:
         cv, th, sf = self.sf.canvas, self.sf.theme, self.sf
         cv.delete(self.tag)
         hot = getattr(self, 'hover_box_top', False) or self.open
+        # 用抗锯齿渲染，和其它控件风格统一
         bg = T.lerp_color(th['surface2'], th['surface3'], 1.0 if hot else 0.0)
-        T.round_rect_items(cv, self.x, self.y, self.x + self.w, self.y + self.h,
-                           self.radius, bg, th['border'], 1, tags=(self.tag,))
+        self._box_photo = ImageTk.PhotoImage(
+            T.raster_rrect(self.w, self.h, self.radius, fill=bg,
+                           outline=th['border'], width=1))
+        it = {'box': cv.create_image(self.x, self.y, anchor='nw',
+                                     image=self._box_photo, tags=self.tag)}
         cv.create_text(self.x + 14, self.y + self.h / 2, text=self.value,
                        anchor='w', fill=th['text'],
                        font=(sf.font, self.font_size), tags=self.tag)
         cv.create_text(self.x + self.w - 14, self.y + self.h / 2,
                        text='▴' if self.open else '▾', fill=th['text_dim'],
                        font=(sf.font, 9), tags=self.tag)
+        self._items = it
 
         if self.open:
             items = self.options
@@ -879,22 +1211,9 @@ class Dropdown:
             self._list_geom = (ly, ih, len(items))
             sf.draw_panel(self.x, ly, self.x + self.w, ly + lh, 10, 0.97,
                           border=True, tags=self.tag)
-            for i, opt in enumerate(items):
-                iy = ly + 4 + i * ih
-                if opt == self.value or i == self.hover:
-                    T.round_rect_items(cv, self.x + 4, iy, self.x + self.w - 4,
-                                       iy + ih, 7,
-                                       th['row_sel'] if opt == self.value
-                                       else th['row_hover'], '', 0,
-                                       tags=(self.tag, self._row_tag))
-                cv.create_text(self.x + 14, iy + ih / 2, text=opt, anchor='w',
-                               fill=th['text'], font=(sf.font, self.font_size),
-                               tags=(self.tag, self._row_tag))
-            cv.tag_bind(self.tag, '<Motion>', self._motion)
-            cv.tag_bind(self.tag, '<Button-1>', self._pick)
+            self._redraw_list_only()
         else:
             self._list_geom = None
-            cv.tag_bind(self.tag, '<Button-1>', self._toggle)
 
     def _redraw_list_only(self):
         """只重画展开的选项行（含高亮），不做面板合成。供悬停调用。
@@ -923,34 +1242,21 @@ class Dropdown:
         cv.tag_raise(self._row_tag)
 
     def _motion(self, e):
-        if not self.open or not self._list_geom:
-            return
-        ly, ih, n = self._list_geom
-        idx = int((e.y - ly - 4) // ih)
-        idx = idx if 0 <= idx < n else -1
-        if idx != self.hover:
-            self.hover = idx
-            self._redraw_list_only()
+        """兼容旧调用（现在由 _on_motion 统一处理）。"""
+        self._on_motion(e)
 
     def _pick(self, e):
-        if not self._list_geom:
-            self._toggle(e)
-            return
-        ly, ih, n = self._list_geom
-        idx = int((e.y - ly - 4) // ih)
-        if 0 <= idx < n:
-            self.value = self.options[idx]
-            self.open = False
-            self.draw()
-            self.sf.canvas.configure(cursor='')
-            if self.on_change:
-                self.on_change(self.value)
-        elif not (self.x <= e.x <= self.x + self.w
-                  and self.y <= e.y <= self.y + self.h):
-            self.open = False
-            self.draw()
+        """兼容旧调用：按坐标选中。"""
+        i = self._option_at(e.x, e.y)
+        if i >= 0:
+            self._pick_index(i)
 
     def close(self):
         if self.open:
             self.open = False
+            self.hover = -1
             self.draw()
+
+    def unbind(self):
+        """注销输入注册（页面切换时调用，避免旧实例继续收事件）。"""
+        self.sf.unregister_input(self)

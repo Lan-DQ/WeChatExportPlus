@@ -201,6 +201,14 @@ class App:
         for iid in cv.find_all():
             if '__bg' not in cv.gettags(iid):
                 cv.delete(iid)
+        # 自绘控件可能绑在 Canvas 上（如 Dropdown），要显式注销，
+        # 否则旧实例回调残留，会去操作已删除的图元
+        for w in self._widgets:
+            if hasattr(w, 'unbind'):
+                try:
+                    w.unbind()
+                except Exception:
+                    pass
         for w in self._entries:
             try:
                 w.destroy()
@@ -737,6 +745,8 @@ class App:
                                       FORMAT_HINTS.get(getattr(self, '_fmt_key',
                                                                FORMAT_DEFAULT), ''),
                                       8, th['text_faint'])
+        # 这三个也是输入消费者，必须登记以便页面切换时注销（否则旧实例残留收事件）
+        self._widgets += [self.list, self._fmt, self._clear_cb]
         self._update_sel_label()
 
     def _on_clear_toggle(self, value):
@@ -1122,6 +1132,15 @@ def main():
     "双击没反应"）。所以这里统一捕获并写日志，同时弹一个尽量朴素的原生
     错误框 —— 用最基础的 tkinter，保证即使自绘界面初始化失败也能显示出来。
     """
+    # 必须在创建 Tk() 之前声明 DPI 感知：否则在 125%/150% 缩放的显示器上，
+    # Windows 会把整个窗口位图拉伸，圆角和文字都会发虚。
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)     # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
     try:
         _boot_log('--- 启动 ---')
         _boot_log(f'frozen={getattr(sys, "frozen", False)} BASE={BASE}')
