@@ -48,7 +48,7 @@ HIDDEN_IMPORTS = [
     'wcdb_server', 'media_resolver', 'image_decoder', 'packed_info_parser',
     'logger', 'html_exporter', 'pdf_exporter', 'csv_exporter', 'excel_exporter',
     'message_content', 'batch_export', 'index_exporter', 'ai_exporter', 'md_exporter',
-    'ai_prompt',
+    'ai_prompt', 'ui_theme', 'ui_widgets', 'PIL.ImageTk', 'PIL.ImageFilter',
     'fpdf', 'fpdf.fonts', 'openpyxl', 'PIL', 'Crypto.Cipher.AES',
 ]
 
@@ -221,14 +221,26 @@ def main():
     log(f'输出目录: {DIST}')
     log('=' * 60)
 
-    # 清理
+    # 清理：build 目录和旧的 dist exe 都必须删干净。
+    # 曾经因为没删旧 exe + PyInstaller 复用缓存，产出一个"能启动但界面是上一版"
+    # 的包（表现为：窗口一直不出现、进程却活着），排查了很久。
     for d in (BUILD,):
         if os.path.isdir(d):
             shutil.rmtree(d, ignore_errors=True)
+    old_exe = os.path.join(DIST, f'{APP_NAME}.exe')
+    if os.path.exists(old_exe):
+        try:
+            os.remove(old_exe)
+            log(f'  [清理] 删除旧 exe')
+        except OSError as e:
+            raise SystemExit(
+                f'无法删除旧 exe（可能程序还在运行）：{old_exe}\n{e}\n'
+                '请先关闭正在运行的 WeChatExportPlus 再重新构建。')
 
     if not args.skip_build:
         log('\n[1] PyInstaller 打包 GUI...')
-        cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
+        cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
+               '--onefile',
                '--windowed', '--name', APP_NAME,
                '--distpath', DIST,
                '--workpath', BUILD,
@@ -236,6 +248,7 @@ def main():
                '--paths', ROOT,
                '--paths', os.path.join(ROOT, 'scripts'),
                '--paths', os.path.join(ROOT, 'exporters'),
+               '--paths', os.path.join(ROOT, 'gui'),
                '--icon', os.path.join(ROOT, 'gui', 'icon.ico')]
         # 开发期 ROOT 下可能有指向内核大目录的 junction（runtime/dll/electron/resources），
         # 明确排除掉，避免 PyInstaller 顺着链接把几百 MB 的二进制塞进 exe。

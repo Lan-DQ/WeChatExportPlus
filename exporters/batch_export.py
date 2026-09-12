@@ -61,6 +61,73 @@ def timestamp_dir_name(now=None):
     return f'导出_{now.strftime("%Y%m%d_%H%M")}'
 
 
+# 每次导出产生的东西，用于「覆盖上次导出」时精确清理。
+# 只认这两种形态，别的文件一律不碰 —— 用户可能把导出目录选在桌面或某个有用目录，
+# 清空整个目录是不可接受的行为。
+_EXPORT_DIR_RE = re.compile(r'^导出_\d{8}_\d{4}(_\d+)?$')
+_EXPORT_FILES = {'导出清单.html', '给AI的指令.txt'}
+
+
+def scan_previous_exports(out_root):
+    """列出会被 clear_previous_exports 删掉的内容（覆盖前给用户看，便于确认）。"""
+    empty = {'dirs': [], 'files': [], 'bytes': 0}
+    if not out_root or not os.path.isdir(out_root):
+        return empty
+    dirs, files, total = [], [], 0
+    try:
+        names = os.listdir(out_root)
+    except OSError:
+        return empty
+    for name in names:
+        p = os.path.join(out_root, name)
+        try:
+            if os.path.isdir(p) and _EXPORT_DIR_RE.match(name):
+                dirs.append(name)
+                for dp, _dn, fns in os.walk(p):
+                    for f in fns:
+                        try:
+                            total += os.path.getsize(os.path.join(dp, f))
+                        except OSError:
+                            pass
+            elif os.path.isfile(p) and name in _EXPORT_FILES:
+                files.append(name)
+                total += os.path.getsize(p)
+        except OSError:
+            pass
+    return {'dirs': dirs, 'files': files, 'bytes': total}
+
+
+def clear_previous_exports(out_root, log=None):
+    """删除 out_root 里**上一次导出产生的内容**，只删本工具自己生成的。
+
+    返回 (删除的目录数, 删除的文件数)。
+    """
+    log = log or (lambda s: None)
+    if not out_root or not os.path.isdir(out_root):
+        return 0, 0
+    nd = nf = 0
+    try:
+        names = os.listdir(out_root)
+    except OSError as e:
+        log(f'覆盖前清理失败（读目录）：{e}')
+        return 0, 0
+    for name in names:
+        p = os.path.join(out_root, name)
+        try:
+            if os.path.isdir(p) and _EXPORT_DIR_RE.match(name):
+                shutil.rmtree(p, ignore_errors=True)
+                if not os.path.exists(p):
+                    nd += 1
+                    log(f'  已删除旧导出目录：{name}')
+            elif os.path.isfile(p) and name in _EXPORT_FILES:
+                os.remove(p)
+                nf += 1
+                log(f'  已删除旧文件：{name}')
+        except OSError as e:
+            log(f'  删除失败 {name}：{e}')
+    return nd, nf
+
+
 def safe_name(name, fallback='未命名'):
     """清洗成合法的 Windows 文件夹/文件名。"""
     s = _ILLEGAL.sub('_', str(name or '')).strip()
@@ -298,7 +365,8 @@ def _find_cached(cache_dir, name):
 
 def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
                     progress=None, should_cancel=None, log=None,
-                    resolve_images=True, limit=0, base_dir=None, prompt=None):
+                    resolve_images=True, limit=0, base_dir=None, prompt=None,
+                    clear_before=False):
     """批量导出多个会话。
 
     参数
@@ -314,16 +382,27 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
     resolve_images: 是否为 html/pdf 解密图片
     base_dir      : 程序目录，用于读取 AI提示词.txt（不传则用内置默认提示词）
     prompt        : 直接指定提示词；None 表示从 base_dir 读取
+    clear_before  : True 时先删掉 out_root 里上一次导出的内容（只删本工具生成的
+                    「导出_日期_时间」目录与两个索引文件，其它文件不动）
 
     返回
     ----
-    {'root': 总目录, 'ok': [...], 'failed': [...], 'cancelled': bool, 'total': n}
+    {'root': 总目录, 'ok': [...], 'failed': [...], 'cancelled': bool,
+     'total': n, 'cleared': (目录数, 文件数)}
     """
     if fmt not in FORMATS:
         raise ValueError(f'不支持的格式: {fmt}')
 
     log = log or (lambda s: None)
     os.makedirs(out_root, exist_ok=True)
+
+    cleared = (0, 0)
+    if clear_before:
+        log('覆盖模式：清理上一次导出…')
+        cleared = clear_previous_exports(out_root, log)
+        if cleared == (0, 0):
+            log('  没有需要清理的旧导出')
+
     root = os.path.join(out_root, timestamp_dir_name())
     # 同名（同一分钟重复导出）不覆盖整个目录，追加序号
     root = os.path.join(out_root, unique_dir(out_root, os.path.basename(root)))
@@ -459,4 +538,5 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
             pass
 
     return {'root': root, 'ok': ok, 'failed': failed,
-            'cancelled': cancelled, 'total': total, 'format': fmt}
+            'cancelled': cancelled, 'total': total, 'format': fmt,
+            'cleared': cleared}
