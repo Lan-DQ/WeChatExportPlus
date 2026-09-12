@@ -12,7 +12,9 @@ from PIL import Image, ImageDraw, ImageTk
 import ui_theme as T
 
 
-# tk 事件 type 是数字常量（见 tkinter.EventType），映射成语义名供控件判断。
+# tk 事件 type 映射成语义名。
+# 键用 int（调用方需先 int() 归一化，见 Surface.dispatch_input）：
+# tkinter 8.6 的 event.type 是 EventType 枚举，枚举成员不等于同值的 int。
 _EVENT_NAMES = {
     4: 'ButtonPress-1', 5: 'ButtonRelease-1', 6: 'Motion', 7: 'Enter', 8: 'Leave',
     22: 'Configure',
@@ -72,12 +74,20 @@ class Surface:
     def dispatch_input(self, event):
         """把 tk 事件转成语义名后分发给控件。
 
-        ⚠️ 坑：tk 的 event.type 是**数字常量**（4=ButtonPress, 5=ButtonRelease,
-        6=Motion, 7=Enter, 8=Leave …），不是 'Motion' 这种字符串。
-        早期直接拿它和字符串比较，结果所有控件都判定为"不是我的事件"，
-        表现为鼠标移上去没反应、点了没动静。这里统一映射成语义名。
+        ⚠️ 两个 tkinter 的坑（都真实踩过，合并起来就是"所有按钮都点不了"）：
+
+        1. event.type 不是字符串，也不是 int —— 在 tkinter 8.6 里它是
+           `tkinter.EventType` 枚举成员（如 `<EventType.ButtonPress: '4'>`）。
+           **枚举成员 != int**（`EventType.ButtonPress == 4` 是 False），
+           所以拿它去查以 int 为键的字典永远查不到，事件会被静默丢弃。
+           这里统一用 int() 归一化，新旧 tkinter 都能用。
+
+        2. 不能拿 event.type 和 'Motion' 这类字符串直接比较，同样是查不到。
         """
-        name = _EVENT_NAMES.get(event.type)
+        try:
+            name = _EVENT_NAMES.get(int(event.type))
+        except (TypeError, ValueError):
+            name = None
         if name is None:
             return None
         event.semantic = name

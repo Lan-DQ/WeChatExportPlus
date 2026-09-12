@@ -14,16 +14,29 @@ sys.path.insert(0, r'C:\My_GongJu\grab\WeChatExportPlus\scripts')
 
 
 class Ev:
-    """模拟 tk 事件（type 用数字常量，和真实事件一致）。"""
+    """模拟 tk 事件。
 
-    _NAMES = {4: 'ButtonPress-1', 5: 'ButtonRelease-1', 6: 'Motion',
-              8: 'Leave', 7: 'Enter'}
+    ⚠️ type 必须用真实的 tkinter.EventType 枚举，不能用裸 int。
+    事故：tkinter 8.6 的 event.type 是 EventType 枚举成员，而
+    `EventType.ButtonPress == 4` 是 **False**，用它查以 int 为键的字典
+    永远查不到 —— 所有事件被静默丢弃，表现就是"所有按钮都点不了"。
+    早期测试里传的是 int，所以测试全绿而真实运行全坏。
+    """
 
     def __init__(self, t, x, y, delta=0):
         self.type = t
         self.x, self.y = x, y
         self.delta = delta
-        self.semantic = self._NAMES.get(t)
+
+
+def _mk(kind, x, y, delta=0):
+    """用真实的 EventType 构造事件。kind: 'press'|'release'|'motion'|'leave'"""
+    from tkinter import EventType
+    t = {'press': EventType.ButtonPress,
+         'release': EventType.ButtonRelease,
+         'motion': EventType.Motion,
+         'leave': EventType.Leave}[kind]
+    return Ev(t, x, y, delta)
 
 
 @pytest.fixture(scope='module')
@@ -138,8 +151,8 @@ def test_button_click_fires_command(app):
                  command=lambda: fired.append(1), kind='primary')
     app.root.update()
     cx, cy = btn.x + btn.w / 2, btn.y + btn.h / 2
-    app.sf.dispatch_input(Ev(4, cx, cy))
-    app.sf.dispatch_input(Ev(5, cx, cy))
+    app.sf.dispatch_input(_mk('press', cx, cy))
+    app.sf.dispatch_input(_mk('release', cx, cy))
     assert fired == [1], '按钮按下+抬起没有触发 command'
 
 
@@ -157,8 +170,8 @@ def test_button_click_works_without_animation_frame(app):
     app.root.update()
     cx, cy = btn.x + btn.w / 2, btn.y + btn.h / 2
     # 连续派发，中间不调 root.update()（模拟极快点击）
-    app.sf.dispatch_input(Ev(4, cx, cy))
-    app.sf.dispatch_input(Ev(5, cx, cy))
+    app.sf.dispatch_input(_mk('press', cx, cy))
+    app.sf.dispatch_input(_mk('release', cx, cy))
     assert fired == [1], '快速点击丢失 —— 又用动画值判断点击了'
 
 
@@ -169,8 +182,8 @@ def test_button_release_outside_does_not_fire(app):
     btn = Button(app.sf, 100, 480, 160, 40, '拖出',
                  command=lambda: fired.append(1), kind='primary')
     app.root.update()
-    app.sf.dispatch_input(Ev(4, btn.x + 10, btn.y + 10))
-    app.sf.dispatch_input(Ev(5, btn.x - 200, btn.y - 200))
+    app.sf.dispatch_input(_mk('press', btn.x + 10, btn.y + 10))
+    app.sf.dispatch_input(_mk('release', btn.x - 200, btn.y - 200))
     assert fired == [], '在按钮外抬起却触发了 command'
 
 
@@ -198,11 +211,11 @@ def test_checkbox_toggles_and_row_opens(app):
     lst.on_open = lambda it: opened.append(it['title'])
     y = lst.y + lst.HEADER_H + 22
 
-    lst.on_input(Ev(4, lst.x + 20, y))
+    app.sf.dispatch_input(_mk('press', lst.x + 20, y))
     assert toggled and not opened, '点勾选框应该只勾选'
 
     toggled.clear()
-    lst.on_input(Ev(4, lst.x + 400, y + lst.ROW_H))
+    app.sf.dispatch_input(_mk('press', lst.x + 400, y + lst.ROW_H))
     assert opened and not toggled, '点行中间应该只打开详情'
 
 
@@ -215,8 +228,8 @@ def test_click_outside_list_does_not_consume(app):
     app.build_sessions()
     app.root.update()
     lst = app.list
-    r = lst.on_input(Ev(4, lst.x + 100, lst.y - 200))
-    assert r is False, '点在列表外却消费了事件'
+    r = app.sf.dispatch_input(_mk('press', lst.x + 100, lst.y - 200))
+    assert r is None, '点在列表外却消费了事件'
 
 
 def test_input_registration_no_leak(app):
@@ -246,9 +259,9 @@ def test_scrollbar_drag_changes_scroll(app):
     assert g, '滚动条几何为空（列表项不够时正常，这里 40 项应该够）'
     sx = g[0] + 2
     before = lst.scroll
-    lst.on_input(Ev(4, sx, g[3] + g[4] / 2))          # 抓住滑块
+    app.sf.dispatch_input(_mk('press', sx, g[3] + g[4] / 2))       # 抓住滑块
     assert lst._drag_off is not None, '按下滑块没有进入拖动状态'
-    lst.on_input(Ev(6, sx, g[3] + g[4] / 2 + 160))    # 往下拖
+    app.sf.dispatch_input(_mk('motion', sx, g[3] + g[4] / 2 + 160))  # 往下拖
     assert lst.scroll > before, '拖动滑块后滚动位置没变'
-    lst.on_input(Ev(5, sx, g[3] + g[4] / 2 + 160))    # 释放
+    app.sf.dispatch_input(_mk('release', sx, g[3] + g[4] / 2 + 160))  # 释放
     assert lst._drag_off is None, '释放后没有结束拖动'
