@@ -167,37 +167,84 @@ class Button:
             fill = T.mix(fill, self.sf.theme['surface'], 0.55)
         return fill, border, fg
 
+    # ── 构建（只做一次）──
+
     def draw(self):
-        cv = self.sf.canvas
-        th = self.sf.theme
+        """建立按钮的所有图元并绑定事件。
+
+        重要（踩过的坑）：早期版本每帧都 delete + 重建图元，导致
+          1. 每帧重新 tag_bind，事件绑定被反复替换；
+          2. 悬停时外发光比按钮大一圈，光标落在发光上触发 Leave、
+             图元缩回又触发 Enter，来回抖动 —— 表现为"悬停狂闪、
+             按下后 Release 丢失、点了没反应"。
+        现在图元只建一次，动画只改颜色与文字位置，事件绑定也只做一次。
+        """
+        cv, th = self.sf.canvas, self.sf.theme
         cv.delete(self.tags)
-        fill, border, fg = self._current_fill()
-        if self.state == 'disabled':
-            fg = th['text_faint']
-            border = th['border']
-        # 悬停时外发光：在按钮下方垫一层比自身略大的半透明圆角
-        if self._hover_t > 0.02 and self.state != 'disabled':
-            glow = T.lerp_color(fill, th['surface'], 0.62)
-            T.round_rect_items(cv, self.x - 3, self.y - 1, self.x + self.w + 3,
-                               self.y + self.h + 4, self.radius + 3, glow, '', 0,
-                               tags=(self.tags,))
-        T.round_rect_items(cv, self.x, self.y, self.x + self.w, self.y + self.h,
-                           self.radius, fill, border if self.kind != 'primary' else '',
-                           1, tags=(self.tags,))
-        if self.kind == 'primary':
-            # 顶部高光：随悬停略微增强，做出"被照亮"的感觉
-            hi = T.lighten(fill, 0.16 + 0.10 * self._hover_t)
-            T.round_rect_items(cv, self.x + 1, self.y + 1, self.x + self.w - 1,
-                               self.y + self.h * 0.55, self.radius, hi, '', 0,
-                               tags=(self.tags,))
+        self._items = {}
+
+        # 外发光：固定尺寸、固定位置（不随悬停变形，避免抖动），
+        # 用颜色接近面板来"隐形"，靠颜色变化体现发光。
+        self._items['glow'] = T.round_rect_items(
+            cv, self.x - 3, self.y - 2, self.x + self.w + 3, self.y + self.h + 4,
+            self.radius + 3, th['surface'], '', 0, tags=(self.tags,), ret_ids=True)
+        self._items['body'] = T.round_rect_items(
+            cv, self.x, self.y, self.x + self.w, self.y + self.h,
+            self.radius, th['accent'], '', 1, tags=(self.tags,), ret_ids=True)
+        self._items['hi'] = T.round_rect_items(
+            cv, self.x + 1, self.y + 1, self.x + self.w - 1,
+            self.y + self.h * 0.55, self.radius, th['accent'], '', 0,
+            tags=(self.tags,), ret_ids=True)
+        self._items['border'] = ([] if self.kind == 'primary' else
+                                 T.round_rect_items(
+                                     cv, self.x + 0.5, self.y + 0.5,
+                                     self.x + self.w - 0.5, self.y + self.h - 0.5,
+                                     self.radius, '', th['border'], 1,
+                                     tags=(self.tags,), ret_ids=True))
         label = f'{self.icon} {self.text}'.strip() if self.icon else self.text
-        cv.create_text(self.x + self.w / 2, self.y + self.h / 2 + self._press_t * 1.2,
-                       text=label, fill=fg,
-                       font=(self.sf.font, self.font_size, 'bold'), tags=self.tags)
+        self._items['label'] = [cv.create_text(
+            self.x + self.w / 2, self.y + self.h / 2, text=label,
+            fill=th['accent_text'], font=(self.sf.font, self.font_size, 'bold'),
+            tags=self.tags)]
+
         cv.tag_bind(self.tags, '<Enter>', self._on_enter)
         cv.tag_bind(self.tags, '<Leave>', self._on_leave)
         cv.tag_bind(self.tags, '<ButtonPress-1>', self._on_press)
         cv.tag_bind(self.tags, '<ButtonRelease-1>', self._on_release)
+        self._paint()
+
+    # ── 重绘（只改属性，不重建）──
+
+    def _paint(self):
+        cv, th = self.sf.canvas, self.sf.theme
+        if not getattr(self, '_items', None):
+            return
+        fill, border, fg = self._current_fill()
+        if self.state == 'disabled':
+            fg = th['text_faint']
+            border = th['border']
+        # 发光：从"与面板同色"渐变到按钮色的淡化版
+        glow_col = T.lerp_color(th['surface'], fill, 0.55 * self._hover_t)
+        disp = 'normal' if (self._hover_t > 0.02 and self.state != 'disabled') \
+            else 'hidden'
+        for i in self._items['glow']:
+            cv.itemconfigure(i, fill=glow_col, outline=glow_col, state=disp)
+        for i in self._items['body']:
+            cv.itemconfigure(i, fill=fill,
+                             outline=(border if self.kind != 'primary' else fill))
+        for i in self._items['hi']:
+            cv.itemconfigure(i, fill=T.lighten(fill, 0.16 + 0.10 * self._hover_t),
+                             state=('normal' if self.kind == 'primary' else 'hidden'))
+        for i in self._items['border']:
+            cv.itemconfigure(i, outline=border)
+        for i in self._items['label']:
+            cv.itemconfigure(i, fill=fg)
+            cv.coords(i, self.x + self.w / 2,
+                      self.y + self.h / 2 + self._press_t * 1.2)
+
+    # 兼容旧调用名
+    def redraw(self):
+        self.draw()
 
     # ── 动画 ──
 
@@ -210,7 +257,7 @@ class Button:
 
         def frame(v):
             setattr(self, attr, start + (target - start) * v)
-            self.draw()
+            self._paint()          # 只改颜色，不重建图元
 
         self.sf.anim.animate(key, dur or self.hover_dur, 'out_cubic', frame)
 
@@ -534,7 +581,11 @@ class CheckList:
 
 
 class Checkbox:
-    """带文字的自绘勾选框（用于「导出并清除之前的导出内容」这类开关）。"""
+    """带文字的自绘勾选框。
+
+    与 Button 同样的教训：图元只建一次，动画只改属性；事件只绑一次。
+    早期版本每帧重建 + 重绑，会导致悬停抖动、点击丢失。
+    """
 
     def __init__(self, sf, x, y, w, text, value=False, on_change=None,
                  font_size=10, box=18):
@@ -544,24 +595,76 @@ class Checkbox:
         self.tag = f'cb{id(self)}'
         self._t = 1.0 if value else 0.0
         self._hover = False
-        self.bind()
         self.draw()
 
-    def bind(self):
-        cv = self.sf.canvas
+    def draw(self):
+        cv, th, sf = self.sf.canvas, self.sf.theme, self.sf
+        cv.delete(self.tag)
+        bx, by, bs = self.x, self.y, self.box
+        it = {}
+        it['box'] = T.round_rect_items(cv, bx, by, bx + bs, by + bs, 5,
+                                       th['check_bg'], th['border'], 1,
+                                       tags=(self.tag,), ret_ids=True)
+        it['tick1'] = [cv.create_line(bx + 4.5, by + bs * 0.52,
+                                      bx + bs * 0.42, by + bs * 0.72,
+                                      fill='#ffffff', width=2.2, capstyle='round',
+                                      tags=(self.tag,))]
+        it['tick2'] = [cv.create_line(bx + bs * 0.42, by + bs * 0.72,
+                                      bx + bs - 4.0, by + bs * 0.28,
+                                      fill='#ffffff', width=2.2, capstyle='round',
+                                      tags=(self.tag,))]
+        it['label'] = [cv.create_text(bx + bs + 10, by + bs / 2, text=self.text,
+                                      anchor='w', fill=th['text_dim'],
+                                      font=(sf.font, self.font_size),
+                                      tags=(self.tag,))]
+        self._items = it
         cv.tag_bind(self.tag, '<Enter>', self._enter)
         cv.tag_bind(self.tag, '<Leave>', self._leave)
         cv.tag_bind(self.tag, '<Button-1>', self._click)
+        self._paint()
+
+    def _paint(self):
+        cv, th = self.sf.canvas, self.sf.theme
+        if not getattr(self, '_items', None):
+            return
+        t = self._t
+        fill = T.lerp_color(th['check_bg'], th['check'], t)
+        border = '' if t > 0.5 else (th['accent'] if self._hover else th['border'])
+        for i in self._items['box']:
+            cv.itemconfigure(i, fill=fill,
+                             outline=(border or fill))
+        # 勾的两笔随进度生长
+        show1 = t > 0.05
+        show2 = t > 0.5
+        col = '#ffffff' if t > 0.5 else th['accent']
+        bx, by, bs = self.x, self.y, self.box
+        p1 = (bx + 4.5, by + bs * 0.52)
+        p2 = (bx + bs * 0.42, by + bs * 0.72)
+        p3 = (bx + bs - 4.0, by + bs * 0.28)
+        k = min(1.0, t / 0.5)
+        for i in self._items['tick1']:
+            cv.itemconfigure(i, state='normal' if show1 else 'hidden', fill=col)
+            if show1:
+                cv.coords(i, p1[0], p1[1],
+                          p1[0] + (p2[0] - p1[0]) * k, p1[1] + (p2[1] - p1[1]) * k)
+        for i in self._items['tick2']:
+            cv.itemconfigure(i, state='normal' if show2 else 'hidden', fill=col)
+            if show2:
+                k2 = (t - 0.5) / 0.5
+                cv.coords(i, p2[0], p2[1],
+                          p2[0] + (p3[0] - p2[0]) * k2, p2[1] + (p3[1] - p2[1]) * k2)
+        for i in self._items['label']:
+            cv.itemconfigure(i, fill=th['text'] if self._hover else th['text_dim'])
 
     def _enter(self, _e):
         self._hover = True
         self.sf.canvas.configure(cursor='hand2')
-        self.draw()
+        self._paint()
 
     def _leave(self, _e):
         self._hover = False
         self.sf.canvas.configure(cursor='')
-        self.draw()
+        self._paint()
 
     def _click(self, _e):
         self.toggle()
@@ -573,9 +676,8 @@ class Checkbox:
 
         def frame(v):
             self._t = start + (target - start) * v
-            self.draw()
+            self._paint()
 
-        # 打勾时用短动画，视觉上有反馈
         self.sf.anim.animate(f'cb{id(self)}', 0.13, 'out_cubic', frame)
         if self.on_change:
             self.on_change(self.value)
@@ -583,38 +685,7 @@ class Checkbox:
     def set_value(self, v):
         self.value = bool(v)
         self._t = 1.0 if self.value else 0.0
-        self.draw()
-
-    def draw(self):
-        cv, th, sf = self.sf.canvas, self.sf.theme, self.sf
-        cv.delete(self.tag)
-        t = self._t
-        bx, by, bs = self.x, self.y, self.box
-        fill = T.lerp_color(th['check_bg'], th['check'], t)
-        border = '' if t > 0.5 else (th['accent'] if self._hover else th['border'])
-        T.round_rect_items(cv, bx, by, bx + bs, by + bs, 5, fill, border, 1,
-                           tags=(self.tag,))
-        if t > 0.05:
-            # 勾的两笔随进度生长，做出"划上去"的感觉
-            cx, cy = bx + bs / 2, by + bs / 2
-            p1 = (bx + 4.5, by + bs * 0.52)
-            p2 = (bx + bs * 0.42, by + bs * 0.72)
-            p3 = (bx + bs - 4.0, by + bs * 0.28)
-            k = min(1.0, t / 0.5)
-            mx = p1[0] + (p2[0] - p1[0]) * k
-            my = p1[1] + (p2[1] - p1[1]) * k
-            col = '#ffffff' if t > 0.5 else th['accent']
-            cv.create_line(p1[0], p1[1], mx, my, fill=col, width=2.2,
-                           capstyle='round', tags=(self.tag,))
-            if t > 0.5:
-                k2 = (t - 0.5) / 0.5
-                ex = p2[0] + (p3[0] - p2[0]) * k2
-                ey = p2[1] + (p3[1] - p2[1]) * k2
-                cv.create_line(p2[0], p2[1], ex, ey, fill=col, width=2.2,
-                               capstyle='round', tags=(self.tag,))
-        col = th['text'] if self._hover else th['text_dim']
-        cv.create_text(bx + bs + 10, by + bs / 2, text=self.text, anchor='w',
-                       fill=col, font=(sf.font, self.font_size), tags=(self.tag,))
+        self._paint()
 
 
 class ProgressBar:
@@ -679,6 +750,7 @@ class Dropdown:
         self.hover = -1
         self._list_geom = None
         self.tag = f'dd{id(self)}'
+        self._row_tag = f'ddr{id(self)}'
         self._list_geom = None
         self.hover_box_top = False
         self.bind()
@@ -736,10 +808,11 @@ class Dropdown:
             items = self.options
             ih = 32
             ly = self.y + self.h + 4
-            # 向上弹：空间不够时
+            # 下面空间不够就向上弹
             if ly + len(items) * ih > sf.canvas.winfo_height() - 10:
                 ly = max(6, self.y - len(items) * ih - 4)
             lh = len(items) * ih + 8
+            self._list_geom = (ly, ih, len(items))
             sf.draw_panel(self.x, ly, self.x + self.w, ly + lh, 10, 0.97,
                           border=True, tags=self.tag)
             for i, opt in enumerate(items):
@@ -748,16 +821,42 @@ class Dropdown:
                     T.round_rect_items(cv, self.x + 4, iy, self.x + self.w - 4,
                                        iy + ih, 7,
                                        th['row_sel'] if opt == self.value
-                                       else th['row_hover'], '', 0, tags=(self.tag,))
+                                       else th['row_hover'], '', 0,
+                                       tags=(self.tag, self._row_tag))
                 cv.create_text(self.x + 14, iy + ih / 2, text=opt, anchor='w',
                                fill=th['text'], font=(sf.font, self.font_size),
-                               tags=self.tag)
-                cv.tag_bind(self.tag, '<Motion>', self._motion)
-            self._list_geom = (ly, ih, len(items))
+                               tags=(self.tag, self._row_tag))
+            cv.tag_bind(self.tag, '<Motion>', self._motion)
             cv.tag_bind(self.tag, '<Button-1>', self._pick)
         else:
             self._list_geom = None
             cv.tag_bind(self.tag, '<Button-1>', self._toggle)
+
+    def _redraw_list_only(self):
+        """只重画展开的选项行（含高亮），不做面板合成。供悬停调用。
+
+        性能要点（踩过的坑）：展开的弹层面板是 PIL 合成的，很贵。
+        早期版本在 _motion 里调 draw()，鼠标在选项上移动一下就要重新合成
+        整块面板，直接卡死。现在悬停只重画这几行文字与高亮块。
+        """
+        if not self.open or not self._list_geom:
+            return
+        cv, th, sf = self.sf.canvas, self.sf.theme, self.sf
+        ly, ih, n = self._list_geom
+        for iid in list(cv.find_withtag(self._row_tag)):
+            cv.delete(iid)
+        for i, opt in enumerate(self.options):
+            iy = ly + 4 + i * ih
+            if opt == self.value or i == self.hover:
+                T.round_rect_items(cv, self.x + 4, iy, self.x + self.w - 4,
+                                   iy + ih, 7,
+                                   th['row_sel'] if opt == self.value
+                                   else th['row_hover'], '', 0,
+                                   tags=(self.tag, self._row_tag))
+            cv.create_text(self.x + 14, iy + ih / 2, text=opt, anchor='w',
+                           fill=th['text'], font=(sf.font, self.font_size),
+                           tags=(self.tag, self._row_tag))
+        cv.tag_raise(self._row_tag)
 
     def _motion(self, e):
         if not self.open or not self._list_geom:
@@ -767,7 +866,7 @@ class Dropdown:
         idx = idx if 0 <= idx < n else -1
         if idx != self.hover:
             self.hover = idx
-            self.draw()
+            self._redraw_list_only()
 
     def _pick(self, e):
         if not self._list_geom:

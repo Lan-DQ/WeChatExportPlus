@@ -14,6 +14,7 @@ tkinter 的 ttk 控件外观由系统主题决定，圆角、悬停、半透明�
 """
 import math
 import os
+import sys as _sys
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
@@ -211,26 +212,31 @@ def darken(c, t=0.12):
 
 # ─────────────────────────── 圆角绘制 ───────────────────────────
 
-def round_rect_items(cv, x1, y1, x2, y2, r, fill='', outline='', width=1, tags=()):
-    """在 Canvas 上画圆角矩形。
+def round_rect_items(cv, x1, y1, x2, y2, r, fill='', outline='', width=1, tags=(),
+                     ret_ids=False):
+    """在 Canvas 上画圆角矩形，返回图元 id 列表。
+
+    ret_ids=True 时会收集所有创建的图元 id —— 调用方可以缓存它们，
+    之后用 itemconfigure 改颜色做动画（比每帧删光重建稳定得多，见 ui_widgets.Button）。
 
     坑：create_oval(fill='', outline=X) 会把整圆的轮廓画出来（四个角变成圆弧）。
     所以填充用 6 个实心块拼，边框用平滑多边形描。
     """
+    ids = []
     if x2 - x1 < 1 or y2 - y1 < 1:
-        return
+        return ids
     r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
     if fill:
         kw = dict(fill=fill, outline=fill, width=0, tags=tags)
         if r <= 0:
-            cv.create_rectangle(x1, y1, x2, y2, **kw)
+            ids.append(cv.create_rectangle(x1, y1, x2, y2, **kw))
         else:
-            cv.create_oval(x1, y1, x1 + 2 * r, y1 + 2 * r, **kw)
-            cv.create_oval(x2 - 2 * r, y1, x2, y1 + 2 * r, **kw)
-            cv.create_oval(x1, y2 - 2 * r, x1 + 2 * r, y2, **kw)
-            cv.create_oval(x2 - 2 * r, y2 - 2 * r, x2, y2, **kw)
-            cv.create_rectangle(x1 + r, y1, x2 - r, y2, **kw)
-            cv.create_rectangle(x1, y1 + r, x2, y2 - r, **kw)
+            ids.append(cv.create_oval(x1, y1, x1 + 2 * r, y1 + 2 * r, **kw))
+            ids.append(cv.create_oval(x2 - 2 * r, y1, x2, y1 + 2 * r, **kw))
+            ids.append(cv.create_oval(x1, y2 - 2 * r, x1 + 2 * r, y2, **kw))
+            ids.append(cv.create_oval(x2 - 2 * r, y2 - 2 * r, x2, y2, **kw))
+            ids.append(cv.create_rectangle(x1 + r, y1, x2 - r, y2, **kw))
+            ids.append(cv.create_rectangle(x1, y1 + r, x2, y2 - r, **kw))
     if outline and r > 0:
         pts = []
         arcs = ((x1 + r, y1 + r, 180), (x2 - r, y1 + r, 270),
@@ -239,11 +245,12 @@ def round_rect_items(cv, x1, y1, x2, y2, r, fill='', outline='', width=1, tags=(
             for i in range(7):
                 a = math.radians(a0 + i * 90 / 6)
                 pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
-        cv.create_polygon(pts, fill='', outline=outline, width=width,
-                          smooth=True, splinesteps=10, tags=tags)
+        ids.append(cv.create_polygon(pts, fill='', outline=outline, width=width,
+                                     smooth=True, splinesteps=10, tags=tags))
     elif outline:
-        cv.create_rectangle(x1, y1, x2, y2, fill='', outline=outline,
-                            width=width, tags=tags)
+        ids.append(cv.create_rectangle(x1, y1, x2, y2, fill='', outline=outline,
+                                       width=width, tags=tags))
+    return ids
 
 
 def glass_panel(bg_img, box, theme, radius=14, alpha=0.80, fill=None):
@@ -375,6 +382,7 @@ class Animator:
         self._items = {}
         self._job = None
         self._seq = 0
+        self.errors = []      # 帧回调异常留存，便于界面上提示/排查
 
     def animate(self, key, dur=0.16, ease='out_cubic', on_frame=None, on_done=None):
         self._seq += 1
@@ -412,6 +420,11 @@ class Animator:
                 if it['on_frame']:
                     it['on_frame'](v)
             except Exception:
+                # 帧回调异常不能让它中断整个动画循环，但也不能不管：
+                # 这里收集起来，由调用方通过 last_error 取用（见 Surface.anim_errors）
+                self.errors.append(f'{key}: {_sys.exc_info()[1]!r}')
+                if len(self.errors) > 20:
+                    del self.errors[:10]
                 done.append(key)
                 continue
             if p >= 1.0:
