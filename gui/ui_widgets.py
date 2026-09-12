@@ -506,6 +506,7 @@ class CheckList:
         self.view = []             # 当前可见（过滤后）下标
         self.scroll = 0
         self.hover_row = -1
+        self._drag_off = None      # 滚动条拖动时，鼠标相对滑块顶部的偏移
         self._avatar_cache = {}    # (wxid,size) -> PhotoImage，避免重复生成
         self._bind()
 
@@ -573,14 +574,21 @@ class CheckList:
         """统一入口：返回 True 表示已消费该事件。"""
         et = getattr(e, 'semantic', e.type)
         if et == 'Motion':
+            # 拖动滚动条时优先处理拖动；否则处理行悬停高亮
+            if getattr(self, '_drag_off', None) is not None:
+                self._scroll_drag(e)
+                return True
             self._on_motion(e)
             return False
         if et == 'Leave':
             self._on_leave(e)
             return False
         if et == 'ButtonPress-1':
+            # 先看是不是点在滚动条上（拖滑块/点轨道跳转）
+            if self._scroll_press(e) == 'break':
+                return True
             return self._on_click(e) == 'break'
-        if et in ('ButtonRelease-1',):
+        if et == 'ButtonRelease-1':
             self._scroll_release(e)
             return False
         if et in ('MouseWheel', 'Button-4', 'Button-5'):
@@ -778,21 +786,6 @@ class CheckList:
         maxs = total - self.visible_rows
         ty = track_y1 + (track_h - thumb_h) * (self.scroll / maxs if maxs else 0)
         return (self.x + self.w - 8, track_y1, track_y2, ty, thumb_h, track_h)
-
-    def _scroll_press(self, e):
-        g = self._thumb_geom()
-        if not g:
-            return
-        sx, ty1, ty2, ty, th, track_h = g
-        # 点在滚动条竖条上（含左右 12px 容差）
-        if not (self.x + self.w - 16 <= e.x <= self.x + self.w):
-            return
-        if ty <= e.y <= ty + th:
-            self._drag_off = e.y - ty          # 抓住滑块拖动
-        else:
-            self._drag_off = th / 2            # 点轨道空白：跳到该位置
-            self._scroll_to_y(e.y - self._drag_off, ty1, track_h, th)
-        return 'break'
 
     def _scroll_drag(self, e):
         if getattr(self, '_drag_off', None) is None:
