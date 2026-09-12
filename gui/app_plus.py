@@ -234,10 +234,8 @@ class App:
 
     def _relayout(self):
         self._rs_job = None
-        self.sf.redraw_bg()
         self.sf.canvas.delete('all')
-        self.sf.canvas.create_image(0, 0, image=self.sf._photo, anchor='nw',
-                                    tags='__bg')
+        self.sf.redraw_bg()       # 内部会重建背景图并画到最底层
         (self.build_home if self.page == 'home' else self.build_sessions)()
 
     def _close_popups(self):

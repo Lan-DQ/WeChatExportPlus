@@ -35,7 +35,7 @@ DARK = {
     'row_sel': '#2b3a63',
     'text': '#eef1f8',
     'text_dim': '#9aa5c0',
-    'text_faint': '#6b7793',
+    'text_faint': '#8b97b5',     # 对 surface2 #262d45 约 4.6:1（原 #6b7793 只有 3.0，提示看不清）
     'accent': '#5b7cfa',
     'accent2': '#8b5cf6',
     'accent_text': '#ffffff',
@@ -63,7 +63,7 @@ LIGHT = {
     'row_sel': '#e4ebff',
     'text': '#1b2233',
     'text_dim': '#5d6880',
-    'text_faint': '#8b95ab',
+    'text_faint': '#5f6a84',     # 对 surface2 #f2f4fa 约 4.8:1（原 #8b95ab 只有 2.7，提示看不清）
     'accent': '#3d6bfa',
     'accent2': '#7b5cf5',
     'accent_text': '#ffffff',
@@ -117,17 +117,33 @@ def _linear_gradient(size, c1, c2):
 
 
 def _add_blobs(img, blobs):
-    """叠几个高斯模糊的色块，做出柔和光晕/氛围感。"""
+    """在渐变底上叠柔和光晕。
+
+    坑：早期做法是"画实心圆 → 高斯模糊 → 用硬阈值 mask 做 composite"。
+    模糊后的圆仍有可见边界，再经阈值 mask 合成会出现**斑驳的云雾块**
+    （浅色主题下尤其明显，像背景脏了）。
+    现在改成每个光晕单独算径向渐变 alpha 再叠加 —— 数学上连续、无硬边，
+    观感是干净的光泽而不是色块。
+    """
     w, h = img.size
-    layer = Image.new('RGB', (w, h), (0, 0, 0))
-    d = ImageDraw.Draw(layer)
+    base = img.convert('RGBA')
+    # 光晕在缩小的画布上算，最后放大回来：又快又天然平滑
+    sw, sh = max(32, w // 6), max(32, h // 6)
     for (rx, ry, rr, col) in blobs:
-        cx, cy, r = rx * w, ry * h, rr * max(w, h)
-        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
-    layer = layer.filter(ImageFilter.GaussianBlur(max(w, h) * 0.12))
-    # 用亮度当遮罩做 screen 混合，避免整张被冲淡
-    mask = layer.convert('L').point(lambda v: min(255, int(v * 1.9)))
-    return Image.composite(layer, img, mask)
+        cx, cy = rx * sw, ry * sh
+        r = rr * max(sw, sh)
+        cell = Image.new('L', (sw, sh), 0)
+        cd = ImageDraw.Draw(cell)
+        steps = 26
+        for i in range(steps, 0, -1):
+            k = i / steps
+            v = int(255 * (1.0 - k) ** 2)      # 中心最亮，向边缘平方衰减
+            cd.ellipse([cx - r * k, cy - r * k, cx + r * k, cy + r * k], fill=v)
+        cell = cell.resize((w, h), Image.BILINEAR)
+        glow = Image.new('RGBA', (w, h), tuple(col) + (0,))
+        glow.putalpha(cell)
+        base = Image.alpha_composite(base, glow)
+    return base.convert('RGB')
 
 
 def make_background(size, theme, image_path=''):

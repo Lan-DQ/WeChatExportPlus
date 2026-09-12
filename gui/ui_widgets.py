@@ -119,22 +119,35 @@ class Surface:
     # ── 背景 ──
 
     def redraw_bg(self):
+        """重算背景并把它画到最底层。
+
+        坑（真实事故）：早期这里只生成图片、不往 Canvas 上画，画的动作散落在
+        set_theme / _relayout 两处 —— 结果**正常启动路径下从来没画过背景**，
+        用户看到的是一块纯白底。现在生成和绘制放在一起，任何调用点都不会漏。
+        """
         w = max(2, self.canvas.winfo_width())
         h = max(2, self.canvas.winfo_height())
         if (w, h) == self.size and self._pil_bg is not None:
+            self._draw_bg()
             return
         self.size = (w, h)
         self._pil_bg = T.make_background((w, h), self.theme, self.bg_image)
         self._photo = ImageTk.PhotoImage(self._pil_bg)
         self._panel_cache.clear()
+        self._draw_bg()
+
+    def _draw_bg(self):
+        cv = self.canvas
+        cv.delete('__bg')
+        cv.create_image(0, 0, image=self._photo, anchor='nw', tags='__bg')
+        cv.tag_lower('__bg')          # 永远垫在最底层
 
     def set_theme(self, theme):
         self.theme = theme
         self.size = (0, 0)
         self.canvas.configure(bg=T.rgb2hex(theme['bg_top']))
-        self.redraw_bg()
         self.canvas.delete('all')
-        self.canvas.create_image(0, 0, image=self._photo, anchor='nw', tags='__bg')
+        self.redraw_bg()          # 自己会重建并画上背景，不需要额外 create_image
 
     def set_bg_image(self, path):
         self.bg_image = path
@@ -304,10 +317,14 @@ class Button:
                 return True
             return False
         if et == 'ButtonRelease-1':
-            was = self._pressed_inside and self._press_t > 0.15
+            # 判定"算不算一次点击"必须用独立的布尔量，不能用动画进度 _press_t：
+            # 动画是异步的，快速点击时 Press 和 Release 之间可能一帧都没跑，
+            # _press_t 还是 0，于是被误判成"没按过" —— 表现就是按钮点了没反应。
+            # 这个 bug 真实发生过，非常难查（点击快慢会改变行为）。
+            was = self._pressed_inside
             self._pressed_inside = False
             self._animate('_press_t', 0.0, 0.12, '_p')
-            if was and self.command:
+            if was and self._in_bounds(e.x, e.y) and self.command:
                 self.command()
                 return True
             return False
