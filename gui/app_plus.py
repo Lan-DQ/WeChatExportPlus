@@ -201,8 +201,11 @@ class App:
         for iid in cv.find_all():
             if '__bg' not in cv.gettags(iid):
                 cv.delete(iid)
-        # 自绘控件可能绑在 Canvas 上（如 Dropdown），要显式注销，
-        # 否则旧实例回调残留，会去操作已删除的图元
+        # 自绘控件都注册在 Surface 上当输入消费者，切页/重建时必须注销干净。
+        # 只遍历 self._widgets 是不够的：CheckList 等不一定被登记进去，
+        # 残留的旧实例会继续收事件（用旧的坐标和状态去操作新画布），
+        # 表现为"某一行/某个控件行为诡异"。
+        self.sf.unregister_all_input()
         for w in self._widgets:
             if hasattr(w, 'unbind'):
                 try:
@@ -233,9 +236,20 @@ class App:
         self._rs_job = self.root.after(140, self._relayout)
 
     def _relayout(self):
+        """窗口尺寸变了，整页重排。
+
+        ⚠️ 必须走 _clear_page()，不能只 canvas.delete('all')：
+        早期这里只删图元不清控件表，结果
+          · 旧控件仍留在输入消费者名单里 —— 一次点击被新旧两份控件同时响应；
+          · 旧 CheckList 的 hover_row 等状态残留，新画的一遍按旧索引判悬停，
+            表现为"某一行固定显示错"；
+          · 展开中的下拉框、悬浮提示等图元被删但对象还在。
+        用户可见现象是"小窗正常、一全屏导出格式框变成两个"。
+        """
         self._rs_job = None
-        self.sf.canvas.delete('all')
-        self.sf.redraw_bg()       # 内部会重建背景图并画到最底层
+        self._clear_page()          # 删图元 + 注销控件 + 清动画（幂等）
+        self.sf.size = (0, 0)       # 让背景按新尺寸重算
+        self.sf.redraw_bg()
         (self.build_home if self.page == 'home' else self.build_sessions)()
 
     def _close_popups(self):
@@ -319,6 +333,13 @@ class App:
         self.theme = T.THEMES[name]
         self.settings['theme'] = name
         save_settings(self.settings)
+        # 行底色/复选框的图里烤着颜色，换主题必须让它们重画
+        for w in self._widgets:
+            if hasattr(w, '_clear_photo_cache'):
+                try:
+                    w._clear_photo_cache()
+                except Exception:
+                    pass
         self.sf.set_theme(self.theme)
         self.sf.font = T.pick_font(self.root)
         self._widgets.clear()

@@ -16,9 +16,29 @@ import ui_theme as T
 # 键用 int（调用方需先 int() 归一化，见 Surface.dispatch_input）：
 # tkinter 8.6 的 event.type 是 EventType 枚举，枚举成员不等于同值的 int。
 _EVENT_NAMES = {
-    4: 'ButtonPress-1', 5: 'ButtonRelease-1', 6: 'Motion', 7: 'Enter', 8: 'Leave',
+    4: 'ButtonPress-1', 5: 'ButtonRelease-1',
+    6: 'Motion', 7: 'Enter', 8: 'Leave',
+    9: 'ButtonPress-2', 10: 'ButtonRelease-2',      # 中键
+    11: 'ButtonPress-3', 12: 'ButtonRelease-3',     # 右键
+    38: 'MouseWheel',                               # Windows/macOS 滚轮
     22: 'Configure',
 }
+
+
+def _semantic(e):
+    """把事件归一化成语义名。
+
+    优先用 dispatch_input 放好的 e.semantic；否则退回 e.type 并做 int() 归一化
+    —— tkinter 8.6 的 event.type 是 EventType 枚举，直接和 'MouseWheel' 这类
+    字符串比较永远不成立。这样直接调 on_input（测试、脚本）也能正常工作。
+    """
+    s = getattr(e, 'semantic', None)
+    if s:
+        return s
+    try:
+        return _EVENT_NAMES.get(int(e.type))
+    except (TypeError, ValueError):
+        return None
 
 
 class Surface:
@@ -63,6 +83,16 @@ class Surface:
             self._input_owners.remove(owner)
         if self._modal is owner:
             self._modal = None
+
+    def unregister_all_input(self):
+        """注销所有输入消费者（页面重建时调用）。
+
+        必须做全量清理：只注销登记在册的控件表是不够的 —— 有的控件
+        （如 CheckList）不一定进了那张表，残留的旧实例会继续收事件，
+        用旧状态操作新画布，表现成"某个控件行为诡异"这种极难查的问题。
+        """
+        self._input_owners.clear()
+        self._modal = None
 
     def set_modal(self, owner):
         self._modal = owner
@@ -115,8 +145,12 @@ class Surface:
         cv.bind('<Motion>', handler, add='+')
         cv.bind('<Button-1>', handler, add='+')
         cv.bind('<ButtonRelease-1>', handler, add='+')
-        cv.bind('<MouseWheel>', handler, add='+')
         cv.bind('<Leave>', handler, add='+')
+        cv.bind('<MouseWheel>', handler, add='+')      # Windows / macOS
+        cv.bind('<Button-4>', handler, add='+')        # X11 滚轮上
+        cv.bind('<Button-5>', handler, add='+')        # X11 滚轮下
+        cv.bind('<Button-2>', handler, add='+')        # 中键（部分鼠标/驱动映射成中键滚动）
+        cv.bind('<Button-3>', handler, add='+')
 
     # ── 动画 ──
 
@@ -304,7 +338,7 @@ class Button:
         """统一入口。返回 True 表示已消费。"""
         if self.state == 'disabled':
             return False
-        et = getattr(e, 'semantic', e.type)
+        et = _semantic(e)
         if et == 'Motion':
             inside = self._in_bounds(e.x, e.y)
             if inside != self._hovering:
@@ -535,6 +569,9 @@ class CheckList:
         self.hover_row = -1
         self._drag_off = None      # 滚动条拖动时，鼠标相对滑块顶部的偏移
         self._avatar_cache = {}    # (wxid,size) -> PhotoImage，避免重复生成
+        # 行底色/复选框图按状态各存一张（不能用单槽，见 _row_ck_photo 注释）
+        self._hl_photos = {}
+        self._ck_photos = {}
         self._bind()
 
     # ── 数据 ──
@@ -599,7 +636,7 @@ class CheckList:
 
     def on_input(self, e):
         """统一入口：返回 True 表示已消费该事件。"""
-        et = getattr(e, 'semantic', e.type)
+        et = _semantic(e)
         if et == 'Motion':
             # 拖动滚动条时优先处理拖动；否则处理行悬停高亮
             if getattr(self, '_drag_off', None) is not None:
@@ -618,14 +655,32 @@ class CheckList:
         if et == 'ButtonRelease-1':
             self._scroll_release(e)
             return False
-        if et in ('MouseWheel', 'Button-4', 'Button-5'):
+        if et in ('MouseWheel', 'Button-4', 'Button-5',
+                  'ButtonPress-2', 'ButtonPress-3'):
             if self._inside(e.x, e.y):
-                if et == 'MouseWheel':
-                    self._wheel(-1 if e.delta > 0 else 1)
-                else:
-                    self._wheel(-1 if et == 'Button-4' else 1)
+                self._wheel_event(e, et)
                 return True
         return False
+
+    def _wheel_event(self, e, et):
+        """滚轮 / 中键 / 右键 → 滚动。
+
+        ⚠️ MouseWheel 的 delta 可能是 120 的整数倍（快速滚动时系统一次发
+        240/360），早期只按"一次一格"处理，滚快了就没反应。这里按倍数算。
+        """
+        if et == 'MouseWheel':
+            d = getattr(e, 'delta', 0) or 0
+            if d == 0:
+                return
+            steps = max(1, abs(int(d)) // 120)
+            self._wheel(-steps if d > 0 else steps)
+        elif et == 'Button-4':
+            self._wheel(-1)
+        elif et == 'Button-5':
+            self._wheel(1)
+        else:
+            # 中键 / 右键：没有滚动量信息，按一屏一页处理
+            self._wheel(-self.visible_rows or -1)
 
     def _scroll_press(self, e):
         g = self._thumb_geom()
@@ -678,6 +733,45 @@ class CheckList:
     def _row_tag(self, idx):
         return f'{self.tag}_row{idx}'
 
+    def _row_bg_photo(self, selected):
+        """行高亮图，按 选中/悬停 两种状态各缓存一张。
+
+        ⚠️ 不能只用一个槽（self._hl_photo）：Canvas 图元持有的是 PhotoImage
+        对象的引用，一旦把属性指向新图，之前画好的行会跟着"变脸"。
+        """
+        key = bool(selected)
+        if key not in self._hl_photos:
+            th = self.sf.theme
+            hl = T.raster_rrect(self.w - 20, self.ROW_H - 6, 10,
+                                fill=(th['row_sel'] if key else th['row_hover']),
+                                alpha=235)
+            self._hl_photos[key] = ImageTk.PhotoImage(hl)
+        return self._hl_photos[key]
+
+    def _row_ck_photo(self, selected):
+        """复选框图，按 选中/未选中 两种状态各缓存一张。
+
+        ⚠️ 这里曾是单槽缓存，导致一个很隐蔽的 bug：悬停切换到勾选状态不同的
+        行时缓存被覆盖，而所有已画出的行都指向同一个 self._ck_photo，
+        于是**整个列表的复选框一起变成最后画的那张**。
+        现象是"鼠标移过去钩子全没了 / 取消一个后还显示全钩"，
+        但计数始终正确（数据没错，只是显示被污染）。
+        """
+        key = bool(selected)
+        if key not in self._ck_photos:
+            th = self.sf.theme
+            bs = 18
+            ck = T.raster_rrect(bs, bs, 5,
+                                fill=(th['check'] if key else th['check_bg']),
+                                outline=(None if key else th['border']), width=1)
+            self._ck_photos[key] = ImageTk.PhotoImage(ck)
+        return self._ck_photos[key]
+
+    def _clear_photo_cache(self):
+        """主题切换后必须清空 —— 图里烤的是颜色。"""
+        self._hl_photos.clear()
+        self._ck_photos.clear()
+
     def _repaint_rows(self, idxs):
         """只重画指定行（含该行的选中/悬停背景、勾选框、文字）。
 
@@ -708,25 +802,13 @@ class CheckList:
         hovered = (idx == self.hover_row)
 
         if selected or hovered:
-            # 行高亮也用超采样渲染，保证圆角平滑
-            if getattr(self, '_hl_photo_key', None) != (selected,):
-                hl = T.raster_rrect(self.w - 20, self.ROW_H - 6, 10,
-                                    fill=(th['row_sel'] if selected
-                                          else th['row_hover']), alpha=235)
-                self._hl_photo = ImageTk.PhotoImage(hl)
-                self._hl_photo_key = (selected,)
-            cv.create_image(self.x + 10, ry + 3, image=self._hl_photo,
+            cv.create_image(self.x + 10, ry + 3,
+                            image=self._row_bg_photo(selected),
                             anchor='nw', tags=(t,))
         # 复选框
         bx, by, bs = self.x + 18, ry + self.ROW_H / 2 - 9, 18
-        box_fill = th['check'] if selected else th['check_bg']
-        if getattr(self, '_ck_photo_key', None) != (selected,):
-            ck = T.raster_rrect(bs, bs, 5, fill=box_fill,
-                                outline=(None if selected else th['border']),
-                                width=1)
-            self._ck_photo = ImageTk.PhotoImage(ck)
-            self._ck_photo_key = (selected,)
-        cv.create_image(bx, by, image=self._ck_photo, anchor='nw', tags=(t,))
+        cv.create_image(bx, by, image=self._row_ck_photo(selected),
+                        anchor='nw', tags=(t,))
         if selected:
             cv.create_line(bx + 4.5, by + 9.5, bx + 7.5, by + 12.8, fill='#ffffff',
                            width=2.2, capstyle='round', tags=(t,))
@@ -851,9 +933,34 @@ class CheckList:
 
     # ── 绘制 ──
 
+    def _row_tags(self):
+        return [self._row_tag(i) for i in range(len(self.items))]
+
+    def _delete_all_rows(self):
+        """删掉所有行图元。
+
+        ⚠️ 不能用通配 tag：Tk 的 tag 匹配**不支持 glob**
+        （`find_withtag('cl123_row*')` 返回 0 个，实测确认）。
+        所以这里按行 tag 逐个删。
+        """
+        cv = self.sf.canvas
+        for t in self._row_tags():
+            cv.delete(t)
+
     def draw(self):
+        """整表重绘。
+
+        ⚠️ 必须同时删掉两类图元：
+          · 'listbody' —— 面板、表头、滚动条（本函数画的）；
+          · 每一行的 _row_tag —— 行内容（_draw_row 画的）。
+        早期只删了 'listbody'，而行图元带的是 _row_tag（如 cl123_row0），
+        于是**每次重绘旧行都留在画布上、新的一遍叠上去**。
+        用户可见现象："窗口一闪就多一个导出格式框"、"切主题后勾选显示错乱"、
+        "某一行钩子凭空消失"。实测一次多余 draw() 就让行图元翻倍。
+        """
         sf, cv, th = self.sf, self.sf.canvas, self.sf.theme
         cv.delete('listbody')
+        self._delete_all_rows()
         sf.draw_panel(self.x, self.y, self.x + self.w, self.y + self.h,
                       self.radius, 0.84, tags='listbody')
 
@@ -934,7 +1041,7 @@ class Checkbox:
         self._paint()
 
     def on_input(self, e):
-        et = getattr(e, 'semantic', e.type)
+        et = _semantic(e)
         if et == 'Motion':
             inside = self._in_bounds(e.x, e.y)
             if inside != self._hover:
@@ -1098,7 +1205,7 @@ class Dropdown:
         self.sf.register_input(self)
 
     def on_input(self, e):
-        et = getattr(e, 'semantic', e.type)
+        et = _semantic(e)
         if et == 'Motion':
             self._on_motion(e)
             return False
