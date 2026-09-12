@@ -210,17 +210,24 @@ def darken(c, t=0.12):
     return mix(c, '#000000', t)
 
 
-# ─────────────────────────── 圆角绘制 ───────────────────────────
+def _hex_or_rgb(c):
+    """接受 '#rrggbb' 或 (r,g,b) 两种写法。"""
+    return hex2rgb(c) if isinstance(c, str) else tuple(c)[:3]
+
+
+# ─────────────────────── 圆角绘制（Canvas 低质量路径） ───────────────────────
 
 def round_rect_items(cv, x1, y1, x2, y2, r, fill='', outline='', width=1, tags=(),
                      ret_ids=False):
     """在 Canvas 上画圆角矩形，返回图元 id 列表。
 
-    ret_ids=True 时会收集所有创建的图元 id —— 调用方可以缓存它们，
-    之后用 itemconfigure 改颜色做动画（比每帧删光重建稳定得多，见 ui_widgets.Button）。
+    ⚠️ 不推荐用于看得见的控件：实测这条路径的圆角**实际上是方的**。
+    用 6 个实心块拼圆角时，Tk 的 create_oval 填充范围比几何圆略小，
+    块与块之间留 1px 缝、被背景色填上，圆角就被啃掉了 ——
+    沿边缘只有 2 种颜色（毫无过渡），这就是肉眼看到的锯齿/颗粒感。
 
-    坑：create_oval(fill='', outline=X) 会把整圆的轮廓画出来（四个角变成圆弧）。
-    所以填充用 6 个实心块拼，边框用平滑多边形描。
+    需要好看的圆角请用 raster_rrect()（PIL 4x 超采样，过渡色 2→8 种）。
+    这里保留给不显眼的内部用途（分隔线、边框、临时调试）。
     """
     ids = []
     if x2 - x1 < 1 or y2 - y1 < 1:
@@ -231,26 +238,68 @@ def round_rect_items(cv, x1, y1, x2, y2, r, fill='', outline='', width=1, tags=(
         if r <= 0:
             ids.append(cv.create_rectangle(x1, y1, x2, y2, **kw))
         else:
-            ids.append(cv.create_oval(x1, y1, x1 + 2 * r, y1 + 2 * r, **kw))
-            ids.append(cv.create_oval(x2 - 2 * r, y1, x2, y1 + 2 * r, **kw))
-            ids.append(cv.create_oval(x1, y2 - 2 * r, x1 + 2 * r, y2, **kw))
-            ids.append(cv.create_oval(x2 - 2 * r, y2 - 2 * r, x2, y2, **kw))
+            # 矩形主体 + 四角弧。注意 create_arc 的签名是
+            # create_arc(x1,y1,x2,y2, start=, extent=, ...) —— start/extent 必须
+            # 用关键字传，位置参数只接受 4 个坐标（否则报 wrong # coordinates）。
             ids.append(cv.create_rectangle(x1 + r, y1, x2 - r, y2, **kw))
             ids.append(cv.create_rectangle(x1, y1 + r, x2, y2 - r, **kw))
-    if outline and r > 0:
-        pts = []
-        arcs = ((x1 + r, y1 + r, 180), (x2 - r, y1 + r, 270),
-                (x2 - r, y2 - r, 0), (x1 + r, y2 - r, 90))
-        for cx, cy, a0 in arcs:
-            for i in range(7):
-                a = math.radians(a0 + i * 90 / 6)
-                pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
-        ids.append(cv.create_polygon(pts, fill='', outline=outline, width=width,
-                                     smooth=True, splinesteps=10, tags=tags))
-    elif outline:
+            for (ax1, ay1, ax2, ay2, st) in (
+                    (x1, y1, x1 + 2 * r, y1 + 2 * r, 90),
+                    (x2 - 2 * r, y1, x2, y1 + 2 * r, 0),
+                    (x2 - 2 * r, y2 - 2 * r, x2, y2, 270),
+                    (x1, y2 - 2 * r, x1 + 2 * r, y2, 180)):
+                ids.append(cv.create_arc(ax1, ay1, ax2, ay2, start=st, extent=90,
+                                         style='pieslice', **kw))
+    if outline:
         ids.append(cv.create_rectangle(x1, y1, x2, y2, fill='', outline=outline,
                                        width=width, tags=tags))
     return ids
+
+
+# ─────────────────── 高质量圆角（PIL 超采样，抗锯齿） ───────────────────
+
+_rrect_cache = {}
+RRECT_SCALE = 4          # 4x 超采样后缩小；实测边缘过渡色 2 种 → 8 种
+
+
+def raster_rrect(w, h, radius, fill=None, outline=None, width=1, alpha=255,
+                 scale=RRECT_SCALE):
+    """渲染一个抗锯齿的圆角矩形，返回 RGBA 图（带缓存）。
+
+    这是解决"颗粒感"的正解：Tk 的 Canvas 不抗锯齿，靠拼块怎么拼边缘都是阶梯状。
+    做法是在 scale 倍画布上画好再用 LANCZOS 缩小 —— 缩放本身产生亚像素过渡，
+    实测边缘过渡色从 2 种提升到 8 种，配合按钮/列表使用观感提升明显。
+    """
+    w, h = max(1, int(round(w))), max(1, int(round(h)))
+    radius = max(0, min(radius, w / 2, h / 2))
+    key = (w, h, round(radius, 2), fill, outline, width, alpha, scale)
+    hit = _rrect_cache.get(key)
+    if hit is not None:
+        return hit
+
+    S = max(1, int(scale))
+    big = Image.new('RGBA', (w * S, h * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    box = [0, 0, w * S - 1, h * S - 1]
+    rr = radius * S
+    f = (_hex_or_rgb(fill) + (alpha,)) if fill else None
+    if outline:
+        d.rounded_rectangle(box, rr, fill=f,
+                            outline=_hex_or_rgb(outline) + (alpha,),
+                            width=max(1, int(round(width * S))))
+    else:
+        d.rounded_rectangle(box, rr, fill=f)
+    img = big.resize((w, h), Image.LANCZOS)
+
+    if len(_rrect_cache) > 600:
+        for k in list(_rrect_cache)[:200]:
+            _rrect_cache.pop(k, None)
+    _rrect_cache[key] = img
+    return img
+
+
+def clear_raster_cache():
+    _rrect_cache.clear()
 
 
 def glass_panel(bg_img, box, theme, radius=14, alpha=0.80, fill=None):

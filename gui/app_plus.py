@@ -160,6 +160,7 @@ class App:
         self.page = 'home'
         self._widgets = []          # 需要在重绘时重建的自绘控件
         self._entries = []          # 真实 tk.Entry（叠在 Canvas 上，必须显式销毁）
+        self._sel_item = None       # 「已选 N 个」文本图元 id（只建一次，避免堆积）
         self._key_visible = False
         self._toast_job = None
 
@@ -207,6 +208,7 @@ class App:
                 pass
         self._entries.clear()
         self._widgets.clear()
+        self._sel_item = None      # 旧图元已被删除，引用必须清掉
         if getattr(self, '_anim', None):
             self.sf.anim.clear()
         self.sf.canvas.configure(cursor='')
@@ -658,6 +660,9 @@ class App:
             self._selected = set()
 
         self.draw_header(f'共 {len(self.sessions)} 个会话 · 勾选后统一导出')
+        # 选中数量显示在标题栏右侧（不占列表表头，避免和勾选框挤在一起）
+        self.sf.text(self.W - 176, 66, '尚未勾选', 10, th['accent'], bold=True,
+                     anchor='e', tags='selhint')
 
         # 返回 + 选择操作
         top = 96
@@ -769,13 +774,17 @@ class App:
         self._update_sel_label()
 
     def _update_sel_label(self):
+        """把「已选 N 个」写进顶部标题栏（而不是列表表头）。
+
+        表头已经有「共 N 个 · 已选 M 个」（CheckList 自己画的），
+        重复显示既冗余又会和勾选框挤在一起。
+        """
         n = len(self._selected)
         try:
-            self.sf.canvas.itemconfigure('selsum', text=f'已选 {n} 个')
+            self.sf.canvas.itemconfigure(
+                'selhint', text=(f'已选 {n} 个会话' if n else '尚未勾选'))
         except Exception:
-            self._sel_txt = self.sf.text(280, 113, f'已选 {n} 个', 10,
-                                         self.theme['accent'], bold=True,
-                                         tags='selsum')
+            pass
 
     def _sel_all(self, value, only_visible=False):
         self.list.set_all(value, only_visible)
