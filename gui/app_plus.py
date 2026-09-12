@@ -404,7 +404,11 @@ class App:
 
         detected = find_xwechat_dirs()
         self.data_dir = detected or getattr(self, 'data_dir', '')
-        self.out_root = getattr(self, 'out_root', DEFAULT_OUT)
+        # 工作目录记忆：上次选过的优先（选择的目录才好记，桌面是默认值不算）
+        saved_out = self.settings.get('out_root', '')
+        self.out_root = getattr(self, 'out_root',
+                                saved_out if saved_out and os.path.isdir(saved_out)
+                                else DEFAULT_OUT)
 
         gap, margin = 20, 38
         cw = (self.W - margin * 2 - gap * 2) // 3
@@ -522,6 +526,9 @@ class App:
         except OSError as e:
             self.toast(f'目录不可写：{e}', 'err')
             return
+        # 记住这个目录，下次开程序直接用
+        self.settings['out_root'] = d
+        save_settings(self.settings)
         self.build_home()
         self.toast('导出工作目录已更新', 'ok')
 
@@ -626,8 +633,17 @@ class App:
             with open(KEY_FILE, 'w', encoding='utf-8') as f:
                 f.write(self.key)
             from wcdb_server import WCDBClient
-            self.wcdb = WCDBClient()
-            self.wcdb.start(self.key, self.data_dir)
+            cli = WCDBClient()
+            cli.start(self.key, self.data_dir)
+            if getattr(self, '_closing', False):
+                # 启动期间用户关窗了。quit_app 已经把手里的 wcdb 置空去关了，
+                # 这个刚建好的没人管 —— 不收掉它会残留进程占着目录。
+                try:
+                    cli.stop()
+                except Exception:
+                    pass
+                return
+            self.wcdb = cli
             self.sessions = self.wcdb.get_sessions() or []
             users = [s.get('username', '') for s in self.sessions
                      if s.get('username') and not str(s.get('username')).startswith('brand')]
@@ -638,6 +654,8 @@ class App:
                     self.nick_map = {}
             n = len(self.sessions)
             self.last_error = ''
+            if getattr(self, '_closing', False):
+                return
             self.root.after(0, self.busy_off)
             self.root.after(0, lambda: self._connected(n))
         except Exception as e:
@@ -645,6 +663,8 @@ class App:
             err = str(e)
             # 留存完整堆栈：界面上给用户看简短版，自动化测试里能取到完整原因
             self.last_error = f'{err}\n{traceback.format_exc()}'
+            if getattr(self, '_closing', False):
+                return          # 窗口已销毁，再 after() 会抛 TclError
             self.root.after(0, self.busy_off)
             self.root.after(0, lambda: self.toast(f'连接失败：{err[:60]}', 'err'))
 
@@ -735,8 +755,11 @@ class App:
                                                           FORMAT_DEFAULT)),
                                on_change=self._on_fmt_change)
         self.sf.text(374, by + 22, '导出到', 9, th['text_dim'])
+        # 导出目录记忆：优先用上次选过的（存在设置里），否则默认桌面
+        default_root = os.path.join(os.environ.get('USERPROFILE', 'C:'), 'Desktop')
+        saved = self.settings.get('export_root', '')
         self.exp_root = getattr(self, 'exp_root',
-                                os.path.join(os.environ.get('USERPROFILE', 'C:'), 'Desktop'))
+                                saved if saved and os.path.isdir(saved) else default_root)
         self._exp_entry = W.Entry(self.sf, 374, by + 32, 300, 34)
         self._exp_entry.set(self.exp_root)
         self._entries.append(self._exp_entry)
@@ -831,6 +854,17 @@ class App:
         if d:
             self.exp_root = d
             self._exp_entry.set(d)
+            self._remember_export_root(d)
+
+    def _remember_export_root(self, path):
+        """把导出目录记进设置，下次开程序直接用它。"""
+        if not path:
+            return
+        self.settings['export_root'] = path
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
 
     # ────────────────────── 导出 ──────────────────────
 
@@ -849,6 +883,7 @@ class App:
         if not self.exp_root:
             self.toast('请选择导出位置', 'err')
             return
+        self._remember_export_root(self.exp_root)   # 手输的也记住
         try:
             os.makedirs(self.exp_root, exist_ok=True)
         except OSError as e:
@@ -1105,16 +1140,31 @@ class App:
     # ────────────────────── 退出 ──────────────────────
 
     def quit_app(self):
-        try:
-            if self.wcdb:
-                self.wcdb.stop()
-                self.wcdb = None
-        except Exception:
-            pass
+        """关窗。
+
+        要点：**先把窗口关掉，再收尾**。收尾里 wcdb.stop() 会走
+        terminate → wait(5s) → taskkill(/T, 10s)，全放在 destroy() 之前
+        就会让"点叉号"卡住最多十几秒。现在窗口立即消失，杀进程丢到后台。
+        """
+        self._closing = True
+        wcdb = self.wcdb
+        self.wcdb = None
         try:
             self.root.destroy()
         except Exception:
             pass
+        if wcdb is not None:
+            import threading
+
+            def _cleanup():
+                try:
+                    wcdb.stop()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_cleanup, daemon=True,
+                                 name='wcdb-shutdown')
+            t.start()
 
     def run(self):
         self.root.mainloop()
