@@ -95,14 +95,24 @@ def test_as_markdown_wraps_in_blockquote():
 
 # ─────────────── 每种格式都要带上 ───────────────
 
-def test_md_contains_prompt(fake, tmp_path):
+def test_md_does_not_contain_prompt(fake, tmp_path):
+    """md 文件里**不应该**再夹带「给 AI 的指令」。
+
+    会话多的时候，每个 .md 都塞一份指令纯属重复浪费（正文可能才几 KB，
+    指令本身就占 1 KB）。指令改为整个导出目录只留一份 给AI的指令.txt。
+    """
     res = be.export_sessions(fake, '', SESSIONS, 'md', str(tmp_path),
                              resolve_images=False, prompt=PROMPT)
     text = open(os.path.join(res['root'], '群聊A.md'), encoding='utf-8').read()
-    assert MARK in text
-    assert '你是我的助理' in text
-    # 指令必须在第一条聊天消息之前
-    assert text.index('你是我的助理') < text.index('[20')
+    assert MARK not in text, '.md 里仍然夹带了指令标题'
+    assert '你是我的助理' not in text, '.md 里仍然夹带了指令正文'
+    # 正文本身要正常
+    assert '# 群聊A' in text
+    assert '[20' in text
+    # 指令要以独立文件的形式存在
+    p = os.path.join(res['root'], '给AI的指令.txt')
+    assert os.path.isfile(p), '缺少 给AI的指令.txt'
+    assert '你是我的助理' in open(p, encoding='utf-8').read()
 
 
 def test_txt_contains_prompt(fake, tmp_path):
@@ -193,11 +203,16 @@ def test_no_prompt_means_no_prompt_block(fake, tmp_path):
 
 
 def test_prompt_loaded_from_base_dir_when_not_passed(fake, tmp_path):
-    """不显式传 prompt 时，应从 base_dir/AI提示词.txt 读取。"""
+    """不显式传 prompt 时，应从 base_dir/AI提示词.txt 读取，并写成独立文件。"""
     base = tmp_path / 'app'
     base.mkdir()
     (base / 'AI提示词.txt').write_text('来自文件的指令ABC', encoding='utf-8')
     res = be.export_sessions(fake, '', SESSIONS, 'md', str(tmp_path / 'out'),
                              resolve_images=False, base_dir=str(base))
+    # 正文里不该有
     text = open(os.path.join(res['root'], '群聊A.md'), encoding='utf-8').read()
-    assert '来自文件的指令ABC' in text
+    assert '来自文件的指令ABC' not in text
+    # 独立文件里要有
+    p = os.path.join(res['root'], '给AI的指令.txt')
+    assert os.path.isfile(p), '缺少 给AI的指令.txt'
+    assert '来自文件的指令ABC' in open(p, encoding='utf-8').read()

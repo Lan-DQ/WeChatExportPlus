@@ -486,7 +486,10 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
                     rows, root, {'wxid': wxid, 'title': base, 'is_group': is_group},
                     image_map=md_exporter.build_image_map(rows),
                     image_src_dir=os.path.join(tmp, '图片'),
-                    prompt=prompt)
+                    # 故意不传 prompt：会话很多时，每个 .md 里都塞一份「给 AI 的指令」
+                    # 纯属重复浪费（正文可能才几 KB，指令就占 1 KB）。
+                    # 指令改为整个导出目录只留一份 给AI的指令.txt（见函数末尾）。
+                    prompt=None)
                 shutil.rmtree(tmp, ignore_errors=True)
                 n_img = out['images']
                 ok.append({'wxid': wxid, 'title': title, 'dir': base,
@@ -528,7 +531,8 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
     except Exception as e:
         log(f'索引页生成失败: {e}')
 
-    # 再放一份提示词原始文件，方便用户对照/复制去改
+    # 整个导出目录只放这一份「给 AI 的指令」（md 格式不再逐个文件重复夹带）。
+    # 注意：这个文件必须在 index_exporter 之后写，因为索引页里也会引用它。
     if prompt:
         try:
             with open(os.path.join(root, '给AI的指令.txt'), 'w',
