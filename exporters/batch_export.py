@@ -154,15 +154,26 @@ def unique_dir(parent, name):
 def unique_base(parent, name, ext='.md'):
     """给「直接放在 parent 下的目标文件」取一个不冲突的主名。
 
-    与 unique_dir 的区别：这里要同时避开**已存在的同名文件**和已存在的同名目录
-    （md 格式的图片目录叫 `<名>_图片`，所以主名冲突会连带图片目录冲突）。
+    必须同时避开三样，少一样都会出事：
+      1. `<名字><ext>`   —— 已存在的目标文件；
+      2. `<名字>`        —— 已存在的同名目录；
+      3. `<名字>_图片`   —— 已存在的图片目录。
+
+    ⚠️ 第 3 条曾经漏掉，造成一个很难查的数据丢失：md 格式的图片放在
+    `<名字>_图片/`。若上一轮残留了图片目录、而 md 已被用户移走或删掉，
+    本函数会误判"名字没被占用"而返回同一个名字；接着 md_exporter 里
+    `shutil.rmtree(<名字>_图片)` 先删掉旧目录，再因本轮没图可写而收尾，
+    用户看到的就是「导出很多会话时，有时候图片文件夹没了」。
     """
-    if not os.path.exists(os.path.join(parent, name + ext)) \
-            and not os.path.exists(os.path.join(parent, name)):
+    def taken(n):
+        return (os.path.exists(os.path.join(parent, n + ext))
+                or os.path.exists(os.path.join(parent, n))
+                or os.path.exists(os.path.join(parent, n + '_图片')))
+
+    if not taken(name):
         return name
     i = 2
-    while (os.path.exists(os.path.join(parent, f'{name}_{i}{ext}'))
-           or os.path.exists(os.path.join(parent, f'{name}_{i}'))):
+    while taken(f'{name}_{i}'):
         i += 1
     return f'{name}_{i}'
 
