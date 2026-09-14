@@ -4,6 +4,7 @@
 每个问题都是真实发生过的，用断言把正确状态固定下来。
 """
 import sys
+import time
 import tkinter as tk
 
 import pytest
@@ -469,3 +470,524 @@ def test_wheel_fast_scroll_uses_delta_multiple(app):
     app.sf.dispatch_input(_wheel(wx, wy, -360))
     app.root.update()
     assert lst.scroll >= 3, f'快速滚动只滚了 {lst.scroll} 格，应按 delta 倍数滚'
+
+
+# ══════════════════════ v3.0：会话标签 / DeepSeek 官网页 ══════════════════════
+#
+# 为什么放在这个文件里、而不是新开一个测试模块：
+#   Tk 每个进程只能有一个根窗口。新模块再建一个 root，会在
+#   test_ui_invariants 销毁 root 之后再建，实测**时好时坏**
+#   （_tkinter.TclError，10 个用例随机全挂）。所以 v3 的界面用例
+#   继续复用这一份 module 级 root。
+#
+# ⚠️ 官网页的宿主是懒启动的：测试里必须把 `App._ds_boot` 换成空函数，
+#    否则 `build_ds()` 之后那个 after(120ms) 会真的去拉起 electron。
+
+@pytest.fixture
+def tagged(app, tmp_path):
+    """把标签仓库指到临时文件，别污染仓库根的「会话标签.json」。"""
+    import session_tags
+    old = app.tag_store
+    app.tag_store = session_tags.TagStore(str(tmp_path / '会话标签.json'))
+    try:
+        yield app
+    finally:
+        app.tag_store = old
+
+
+def _no_ds_boot(app):
+    """截图/测试用：禁止真启动内嵌浏览器。"""
+    import app_plus as A
+    if not hasattr(A.App, '_ds_boot_orig'):
+        A.App._ds_boot_orig = A.App._ds_boot
+    A.App._ds_boot = lambda self: None
+    return app
+
+
+def _mk_export(root, chats=(('群聊A', 3), ('群聊B', 60))):
+    import os
+    with open(os.path.join(root, '给AI的指令.txt'), 'w', encoding='utf-8') as f:
+        f.write('x')
+    with open(os.path.join(root, '导出清单.html'), 'w', encoding='utf-8') as f:
+        f.write('x')
+    for name, n in chats:
+        with open(os.path.join(root, f'{name}.md'), 'w', encoding='utf-8') as f:
+            f.write('x')
+        d = os.path.join(root, f'{name}_图片')
+        os.makedirs(d, exist_ok=True)
+        for i in range(1, n + 1):
+            with open(os.path.join(d, f'{i:04d}.jpg'), 'wb') as f:
+                f.write(b'x')
+
+
+def test_tag_chips_are_clickable(tagged):
+    """标签行必须有 chip（自绘 Button → 必须登记进输入消费者，否则点了没反应）。"""
+    a = _fresh_sessions(tagged)
+    a.tag_store.assign([f'wxid_{i}' for i in range(4)], '常看')
+    a.tag_store.assign([f'wxid_{i}' for i in range(4, 8)], '工作')
+    a.build_sessions()
+    a.root.update()
+    labels = [str(getattr(w, 'text', '')) for w in a._widgets]
+    assert any('常看' in x for x in labels)
+    assert any('工作' in x for x in labels)
+    assert any('标签管理' in x for x in labels)
+
+
+def test_click_tag_replaces_selection(tagged):
+    """点标签 = **替换**当前勾选（用户明确要的行为）。"""
+    a = _fresh_sessions(tagged)
+    a.tag_store.assign(['wxid_1', 'wxid_2', 'wxid_3'], '常看')
+    a.tag_store.assign(['wxid_5'], '工作')
+    a.build_sessions()
+    a._sel_all(True)
+    assert len(a._selected) == len(a.list.items) > 3
+
+    a._sel_by_tag('工作')
+    assert a._selected == {'wxid_5'}
+    assert [it['wxid'] for it in a.list.items if it.get('sel')] == ['wxid_5']
+
+    a._sel_by_tag('常看')
+    assert a._selected == {'wxid_1', 'wxid_2', 'wxid_3'}
+
+
+def test_tag_selection_survives_page_switch(tagged):
+    """按标签勾选的结果必须进 _selected，否则切页回来勾选会整体丢失。"""
+    a = _fresh_sessions(tagged)
+    a.tag_store.assign(['wxid_2', 'wxid_4'], '常看')
+    a.build_sessions()
+    a._sel_by_tag('常看')
+    a.build_sessions()
+    assert {it['wxid'] for it in a.list.items if it.get('sel')} == {'wxid_2', 'wxid_4'}
+
+
+def test_apply_tag_persists_to_file(tagged, tmp_path):
+    import json
+    a = _fresh_sessions(tagged)
+    a.build_sessions()
+    a._sel_all(False)
+    a.list.items[0]['sel'] = True
+    a.list.items[1]['sel'] = True
+    a._selected = {a.list.items[0]['wxid'], a.list.items[1]['wxid']}
+    assert a._apply_tag('  常看  ', sorted(a._selected)) is True     # 名字会被清洗
+    with open(str(tmp_path / '会话标签.json'), encoding='utf-8') as f:
+        data = json.load(f)
+    assert set(data['sessions']) == a._selected
+    assert all(v == ['常看'] for v in data['sessions'].values())
+    assert '常看' in a.tag_store.all_tags()
+
+
+def test_row_tag_text_does_not_accumulate_items(tagged):
+    """行内标签是拼进标题字符串的 —— 重绘不能因此堆图元。"""
+    a = _fresh_sessions(tagged)
+    a.tag_store.assign(['wxid_1', 'wxid_2'], '常看')
+    a.build_sessions()
+    a.root.update()
+    lst = a.list
+    before = len(a.sf.canvas.find_all())
+    for _ in range(3):
+        lst.draw()
+    assert len(a.sf.canvas.find_all()) == before
+
+
+def test_row_shows_tag_inline_with_title(tagged):
+    a = _fresh_sessions(tagged)
+    a.tag_store.assign(['wxid_1'], '常看')
+    a.build_sessions()
+    a.root.update()
+    texts = []
+    for iid in a.sf.canvas.find_all():
+        try:
+            if a.sf.canvas.type(iid) == 'text':
+                texts.append(str(a.sf.canvas.itemcget(iid, 'text')))
+        except Exception:
+            pass
+    # 标题行形如「会话1 #常看」；chip 上也会出现 #常看，所以按"会话"前缀区分
+    assert any('会话' in t and '#常看' in t for t in texts), texts[:40]
+
+
+def test_ds_page_builds_without_host(tagged):
+    """官网页不能因为没启动 electron 就崩。"""
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.ds_out_root = ''          # 别让上一次用例留下的目录触发自动扫描
+    a.ds_units = []
+    a.build_ds()
+    a.root.update()
+    assert a.page == 'ds'
+    assert a.list is not None and a.list.items == []
+    assert a.ds is None and a._ds_visible is False
+    labels = [str(getattr(w, 'text', '')) for w in a._widgets]
+    assert any('返回导出页' in x for x in labels)
+    assert any('开始发送' in x for x in labels)
+
+
+def test_ds_scan_and_batch_summary(tagged, tmp_path):
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.build_ds()
+    a.ds_out_root = str(tmp_path)
+    _mk_export(str(tmp_path))
+    a._ds_scan()
+    a.root.update()
+    units = a.ds_units
+    assert [u['label'] for u in units] == ['给AI的指令.txt', '群聊A.md', '群聊B.md',
+                                           '导出清单.html', '群聊A_图片', '群聊B_图片']
+    assert len(a.ds_selected) == len(units)          # 默认全选
+    assert len(a.list.items) == len(units)
+
+    a._ds_update_hint()
+    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    # 默认「只发文档（建议）」：图片被跳过 → 只剩 4 个文档、1 批
+    assert '只发文档' in txt, txt
+    assert '4 个文件' in txt and '1 批' in txt, txt
+
+    # 关掉「只发文档」后：67 个文件；每批默认 20（实测 40 个附件就会被官网拒收）
+    a._ds_docs_only = False
+    a._ds_limit = 20
+    a._ds_update_hint()
+    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    assert '67 个文件' in txt, txt
+    assert '分 4 批' in txt, txt
+    a._ds_docs_only = True
+
+    img_ids = {u['id'] for u in units if u['kind'] == 'image'}
+    for it in a.list.items:
+        if it['wxid'] in img_ids:
+            it['sel'] = False
+    a.ds_selected -= img_ids
+    a._ds_update_hint()
+    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    assert '4 个文件' in txt
+
+
+def test_ds_leave_is_safe_without_host(tagged):
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.build_ds()
+    a._ds_leave()
+    assert a._ds_visible is False
+    a.build_sessions()
+    assert a.page == 'sessions'
+
+
+def test_ds_rect_stays_inside_window(tagged):
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    x, y, w, h = a._ds_rect()
+    assert x > 38 + a.DS_LEFT_W
+    assert x + w <= a.W - 30 and y + h <= a.H - 30
+    assert w > 300 and h > 200
+
+
+# ── 回归：标签弹窗必须真的能交互 ──
+#
+# 事故：弹窗创建到一半抛异常（`T.rgb2hex(theme['text'])` —— 主题里的颜色
+# 有的是元组、有的本来就是 '#rrggbb' 字符串），而 Button 的 command 是在
+# Surface.dispatch_input 里被调用的，那里 `except Exception: pass` 把异常吞了。
+# 用户看到的就是"跳出来一个空框、点不动"，没有任何报错线索。
+# 现在：rgb2hex 兼容字符串 + 异常会写 .ui_errors.log，并且有下面这组断言。
+
+def _tag_dialog_widgets(win):
+    """把一个 Toplevel 里的所有控件按类名收集起来。"""
+    out = {'Button': [], 'Entry': [], 'Label': []}
+    stack = [win]
+    while stack:
+        cur = stack.pop()
+        for c in cur.winfo_children():
+            cls = c.winfo_class()
+            if cls in out:
+                out[cls].append(c)
+            stack.append(c)
+    return out
+
+
+def test_tag_dialog_is_interactive(tagged):
+    import tkinter as tk
+    a = _fresh_sessions(tagged)
+    a._sel_all(False)
+    a.list.items[0]['sel'] = True
+    a.list.items[1]['sel'] = True
+    a._selected = {a.list.items[0]['wxid'], a.list.items[1]['wxid']}
+    a.tag_store.assign(['wxid_7'], '旧标签')
+
+    a.open_tag_dialog()
+    a.root.update()
+    wins = [w for w in a.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert len(wins) == 1, '标签弹窗没建出来'
+    win = wins[0]
+    try:
+        w = _tag_dialog_widgets(win)
+        # 必须真的有输入框（用户要输入标签名）
+        assert len(w['Entry']) == 1, '弹窗里没有输入标签名的输入框'
+        labels = [str(c.cget('text')) for c in w['Button']]
+        assert any('新建并贴上' in t for t in labels), labels
+        assert any('贴到勾选的会话' in t for t in labels), labels
+        assert any('只勾选这些会话' in t for t in labels), labels
+        assert any('删除' in t for t in labels), labels
+        assert any('清除' in t for t in labels), labels
+        # 已有标签要显示出来
+        texts = [str(c.cget('text')) for c in w['Label']]
+        assert any('旧标签' in t for t in texts), texts
+
+        # 真的点一下「新建并贴上」
+        w['Entry'][0].insert(0, '新标签')
+        btn = [c for c in w['Button'] if '新建并贴上' in str(c.cget('text'))][0]
+        btn.invoke()
+        a.root.update()
+        assert a.tag_store.tags_of(a.list.items[0]['wxid']) == ['新标签']
+        assert a.tag_store.tags_of(a.list.items[1]['wxid']) == ['新标签']
+    finally:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        a.root.update()
+
+
+def test_rgb2hex_accepts_strings_and_tuples():
+    """主题颜色两种形态都有，rgb2hex 必须都能吃（否则弹窗建到一半就崩）。"""
+    import ui_theme as T
+    assert T.rgb2hex((18, 21, 32)) == '#121520'
+    assert T.rgb2hex('#1e2438') == '#1e2438'
+    assert T.rgb2hex('1e2438') == '#1e2438'
+    for name, th in T.THEMES.items():
+        for key in ('bg_top', 'surface', 'text', 'text_dim', 'accent', 'surface2',
+                    'border', 'ok', 'warn', 'err'):
+            if key in th:
+                assert T.rgb2hex(th[key]).startswith('#'), f'{name}.{key} 不是颜色'
+
+
+# ── 回归：一键发送的界面路径不能"点了没反应" ──
+#
+# 事故：发送进度窗里用了 `T.rgb2hex(theme['text'])`，而主题里的 text/surface
+# 本来就是 '#rrggbb' 字符串 → ValueError → 异常被分发层吞掉 →
+# 用户点「开始发送」**什么都不发生**。下面两个用例把这条路径钉住。
+
+def _ds_ready_app(a, tmp_path):
+    import os
+    a.ds_out_root = str(tmp_path)
+    # 模块共享一个 App，前面的用例可能留下"发送中"状态
+    a._ds_sending = False
+    a._ds_cancel_flag = False
+    with open(os.path.join(str(tmp_path), '给AI的指令.txt'), 'w', encoding='utf-8') as f:
+        f.write('x')
+    a.build_ds()
+    a._ds_scan()
+    a.root.update()
+    return a
+
+
+def test_ds_send_dry_run_opens_progress_window(tagged, tmp_path):
+    """演练分批：必须真的弹出进度窗，而不是静默失败。"""
+    import tkinter as tk
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    _ds_ready_app(a, tmp_path)
+    before = [w for w in a.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    a._ds_send(dry_run=True)
+    a.root.update()
+    wins = [w for w in a.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert len(wins) == len(before) + 1, '演练分批没有弹出进度窗'
+    win = wins[-1]
+    try:
+        # 等后台线程把结果发回来（演练很快）
+        for _ in range(40):
+            a.root.update()
+            time.sleep(0.05)
+            if not getattr(a, '_ds_sending', False):
+                break
+        assert getattr(a, '_ds_sending', False) is False, '演练没有正常结束'
+    finally:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        a.root.update()
+
+
+def test_ds_send_without_host_gives_readable_error(tagged, tmp_path):
+    """没有宿主时不能崩，也不能去点登录表单 —— 要给出可读原因。"""
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    _ds_ready_app(a, tmp_path)
+    msgs = []
+    a.toast = lambda msg, kind='info', ms=2600: msgs.append((kind, msg))
+    try:
+        a._ds_ensure_host = lambda: '模拟：内嵌浏览器没起来'
+        a._ds_send()                       # 非演练路径
+        a.root.update()
+        assert msgs and '浏览器' in msgs[0][1], msgs
+        assert getattr(a, '_ds_sending', False) is False
+    finally:
+        # ⚠️ 必须还原：App 是模块级共享的，实例属性会污染后面的用例
+        del a.toast
+        del a._ds_ensure_host
+
+
+def test_ds_preflight_blocks_when_not_logged_in(tagged):
+    """没登录时必须挡住（页面上根本没有上传入口，硬发只会样样失败）。"""
+    a = _no_ds_boot(_fresh_sessions(tagged))
+
+    class FakeHost:
+        running = True
+
+        def state(self):
+            return {'ok': True, 'ready': True, 'loggedIn': False, 'fileInput': False}
+
+    a.ds = FakeHost()
+    assert '登录' in a._ds_preflight()
+
+    class Host2(FakeHost):
+        def state(self):
+            return {'ok': True, 'ready': True, 'loggedIn': True, 'fileInput': False}
+
+    a.ds = Host2()
+    assert '上传入口' in a._ds_preflight()
+
+    class Host3(FakeHost):
+        def state(self):
+            return {'ok': True, 'ready': True, 'loggedIn': True, 'fileInput': True}
+
+    a.ds = Host3()
+    assert a._ds_preflight() == ''
+    a.ds = None
+
+
+def _descendants(w):
+    out = []
+    stack = [w]
+    while stack:
+        cur = stack.pop()
+        for c in cur.winfo_children():
+            out.append(c)
+            stack.append(c)
+    return out
+
+
+def test_ds_progress_window_can_be_closed_after_finish(tagged, tmp_path):
+    """演练/发送结束后，进度窗必须能关掉。
+
+    事故：窗口只置了"取消"标记、从不销毁，而且点 X 也是静默取消 ——
+    用户看到的是"演练分批的窗口关不掉"。
+    """
+    import tkinter as tk
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    _ds_ready_app(a, tmp_path)
+    a._ds_send(dry_run=True)
+    a.root.update()
+    wins = [w for w in a.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert wins, '演练没有弹出进度窗'
+    win = wins[-1]
+    for _ in range(80):
+        a.root.update()
+        time.sleep(0.05)
+        if not getattr(a, '_ds_sending', False):
+            break
+    assert getattr(a, '_ds_sending', False) is False, '演练没有正常结束'
+
+    btns = [c for c in _descendants(win) if c.winfo_class() == 'Button']
+    labels = [str(b.cget('text')) for b in btns]
+    closers = [b for b in btns if '关闭' in str(b.cget('text'))]
+    assert closers, f'结束后没有「关闭」按钮：{labels}'
+    closers[0].invoke()
+    a.root.update()
+    assert not win.winfo_exists(), '点了关闭窗口还在'
+
+
+def test_toast_not_hidden_behind_embedded_browser(tagged):
+    """官网页签上的提示不能被内嵌浏览器挡住。
+
+    浏览器是独立 Win32 子窗口，永远画在画布之上；右下角的提示会被它盖住，
+    用户抱怨"提示看不到"。所以官网页上的提示必须落在浏览器矩形之外。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.ds_out_root = ''
+    a.ds_units = []
+    a.build_ds()
+    a._ds_visible = True                 # 假装浏览器已经嵌进来并显示中
+    try:
+        x1, y1, x2, y2 = a._toast_rect()
+        bx, by, bw, bh = a._ds_rect()
+        overlap = not (x2 <= bx or x1 >= bx + bw or y2 <= by or y1 >= by + bh)
+        assert not overlap, (
+            f'提示会与浏览器区域重叠：toast={(x1, y1, x2, y2)} '
+            f'browser={(bx, by, bx + bw, by + bh)}')
+        assert x1 >= 0 and y1 >= 0 and x2 <= a.W and y2 <= a.H, '提示跑到窗口外了'
+        # 顺便确认真的能画出来
+        a.sf.canvas.delete('toast')
+        a.toast('测试提示', 'warn')
+        a.root.update()
+        assert a.sf.canvas.bbox('toast'), '提示没画出来'
+    finally:
+        a._ds_visible = False
+        a.sf.canvas.delete('toast')
+
+
+def test_ds_preflight_accepts_page_ready_by_ready_state(tagged):
+    """页面已经加载好了，就不能再报"还在加载"。
+
+    事故：官网页加载完之后仍有子资源/接口活动，Electron 会再发 did-start-loading
+    却没有对应的 did-finish-load，主进程侧的 S.pageReady 卡在 false ——
+    用户看到的是"页面明明好了，程序却说还在加载，不能发送"。
+    现在两条判据（主进程标志 / 页面自己的 document.readyState）任一成立即放行。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+
+    def host(ready, ready_state, logged=True, fi=True):
+        class H:
+            running = True
+
+            def state(self):
+                return {'ok': True, 'ready': ready, 'readyState': ready_state,
+                        'loggedIn': logged, 'fileInput': fi}
+        return H()
+
+    a.ds = host(False, 'complete')          # ← 脱节状态：必须放行
+    assert a._ds_preflight() == ''
+    a.ds = host(True, '')                   # 只有主进程标志
+    assert a._ds_preflight() == ''
+    a.ds = host(False, 'loading')           # 真的还在加载
+    assert '还在加载' in a._ds_preflight()
+    a.ds = host(False, '')                  # 两条都没有
+    assert '还在加载' in a._ds_preflight()
+    a.ds = None
+
+
+def test_ds_send_refreshes_stale_prompt_file(tagged, tmp_path):
+    """发送前必须把导出目录里的「给AI的指令.txt」刷新成最新模板。
+
+    事故：导出目录里那个文件是**导出当时**写的；用户后来改了 AI提示词.txt
+    （加了「分批接收协议」），旧导出目录里还是老文案 —— 从那儿发送，AI 拿到的
+    就是过时指令（用户实测踩到："你给ai的指令那个txt没修改啊"）。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    import os
+    root = str(tmp_path)
+    _mk_export(root)
+    stale = os.path.join(root, '给AI的指令.txt')
+    with open(stale, 'w', encoding='utf-8') as f:
+        f.write('【角色】这是过期的老文案，没有分批接收协议')
+    a.ds_out_root = root
+    a.ds_units = []
+    a.build_ds()
+    a._ds_scan()
+
+    got = a._ds_refresh_prompt_file()
+    assert got == stale, got
+    with open(stale, encoding='utf-8') as f:
+        text = f.read()
+    assert '分批接收协议' in text, text[:80]
+    assert '我已发送完毕' in text
+
+
+def test_ui_error_hook_reports_instead_of_swallowing(app):
+    seen = []
+    old = app.sf.on_error
+    app.sf.on_error = seen.append
+
+    class Boom:
+        def on_input(self, e):
+            raise RuntimeError('boom')
+
+    app.sf.register_input(Boom())
+    try:
+        app.sf.dispatch_input(_mk('motion', 5, 5))
+    finally:
+        app.sf._input_owners = [o for o in app.sf._input_owners
+                                if not isinstance(o, Boom)]
+        app.sf.on_error = old
+    assert seen and isinstance(seen[0], RuntimeError), seen

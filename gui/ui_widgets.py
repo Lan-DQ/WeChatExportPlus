@@ -63,6 +63,10 @@ class Surface:
         self._anim = None
         self._input_owners = []     # 注册的输入消费者（按注册顺序）
         self._modal = None          # 当前独占输入的控件（如展开的下拉框）
+        # 控件回调里抛异常时往哪儿报（App 会写日志 + 弹提示）。
+        # 以前是静默 pass —— 结果一个"弹窗建到一半抛错"的 bug 表现成
+        # "跳出来一个空框、点不动"，排查了很久。
+        self.on_error = None
         self._install_input_pump()
         self.redraw_bg()
 
@@ -125,16 +129,30 @@ class Surface:
             try:
                 if self._modal.on_input(event):
                     return 'break'
-            except Exception:
+            except Exception as e:      # noqa: BLE001
                 self._modal = None
+                self._report(e)
             return None
         for owner in list(self._input_owners):
             try:
                 if owner.on_input(event):
                     return 'break'
-            except Exception:
-                pass
+            except Exception as e:      # noqa: BLE001
+                self._report(e)
         return None
+
+    def _report(self, exc):
+        """把控件回调里的异常交出去（App 会写日志 + 提示用户）。
+
+        不再静默吞掉：以前一个"弹窗建到一半抛错"的 bug 会表现成
+        "跳出一个空框、点不动"，没有任何线索。
+        """
+        if self.on_error is None:
+            return
+        try:
+            self.on_error(exc)
+        except Exception:               # noqa: BLE001
+            pass
 
     def _install_input_pump(self):
         cv = self.canvas
@@ -558,9 +576,11 @@ class CheckList:
     HEADER_H = 30
     ROW_H = 44
 
-    def __init__(self, sf, x, y, w, h, on_toggle=None, on_open=None, radius=14):
+    def __init__(self, sf, x, y, w, h, on_toggle=None, on_open=None, radius=14,
+                 header='会话列表'):
         self.sf, self.x, self.y, self.w, self.h = sf, x, y, w, h
         self.radius = radius
+        self.header = header       # 表头标题（官网页用来显示「发送清单」）
         self.on_toggle, self.on_open = on_toggle, on_open
         self.tag = f'cl{id(self)}'
         self.items = []            # [{'wxid','title','preview','time','group','sel'}]
@@ -609,6 +629,18 @@ class CheckList:
         for it in self.items:
             it['sel'] = not it.get('sel')
         self.draw()
+
+    def set_selected_wxids(self, wxids, value=True):
+        """按 wxid 批量设置勾选，**其余行一律取消**（"按标签勾选"要的替换语义）。
+
+        逐行 `it['sel'] = True` 是不够的：调用方还得自己把 App._selected 重算一遍，
+        否则切页回来勾选会整体丢失（_session_items 用 _selected 复原 sel）。
+        """
+        want = {str(w) for w in (wxids or [])}
+        for it in self.items:
+            it['sel'] = bool(value and str(it.get('wxid')) in want)
+        self.draw()
+        return [it['wxid'] for it in self.items if it.get('sel')]
 
     def toggle_index(self, i):
         if 0 <= i < len(self.items):
@@ -818,10 +850,17 @@ class CheckList:
         ax = bx + bs + 12
         ph = self._avatar(it['title'], it['wxid'], 30)
         cv.create_image(ax, ry + self.ROW_H / 2 - 15, image=ph, anchor='nw', tags=(t,))
-        # 文字
+        # 文字。标签直接拼在标题后面（不右对齐到时间那一列 —— 时间在中线上，
+        # 右对齐的标签会和它叠在一起，实测过）。
         tx = ax + 40
         marker = '👥 ' if it.get('group') else ''
-        cv.create_text(tx, ry + 14, text=marker + it['title'], anchor='w',
+        tags = it.get('tags') or []
+        disp = marker + it['title']
+        if tags:
+            tag_txt = ' '.join('#' + str(x) for x in tags)
+            room = max(6, 34 - len(tag_txt) - 1)     # 给标签留位置，标题让一让
+            disp = marker + it['title'][:room] + ' ' + tag_txt
+        cv.create_text(tx, ry + 14, text=disp, anchor='w',
                        fill=th['text'], font=(sf.font, 10, 'bold'), tags=(t,))
         cv.create_text(tx, ry + 30, text=(it.get('preview') or '')[:46], anchor='w',
                        fill=th['text_dim'], font=(sf.font, 9), tags=(t,))
@@ -964,10 +1003,13 @@ class CheckList:
         sf.draw_panel(self.x, self.y, self.x + self.w, self.y + self.h,
                       self.radius, 0.84, tags='listbody')
 
-        # 表头
-        cv.create_text(self.x + 18, self.y + 17, text='会话列表', anchor='w',
+        # 表头（标题可由调用方指定：会话页是「会话列表」，官网页是「发送清单」）
+        head = str(getattr(self, 'header', '') or '会话列表')
+        cv.create_text(self.x + 18, self.y + 17, text=head, anchor='w',
                        fill=th['text'], font=(sf.font, 12, 'bold'), tags='listbody')
-        cv.create_text(self.x + 148, self.y + 18, anchor='w',
+        # 计数文字的起点跟着标题长度走，标题变长时不会和它叠在一起
+        hx = 18 + max(130, 15 * len(head) + 10)
+        cv.create_text(self.x + hx, self.y + 18, anchor='w',
                        text=f"共 {len(self.items)} 个 · 已选 {len(self.selected_wxids())} 个",
                        fill=th['text_dim'], font=(sf.font, 9), tags='listbody')
         cv.create_line(self.x + 12, self.y + self.HEADER_H - 1,

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """md_exporter 与 batch_export 的 md 布局测试。"""
 import os
+import re
 import sys
 
 import pytest
@@ -89,12 +90,16 @@ def test_document_multiline_is_indented():
 
 
 def test_document_image_index_matches_filename():
+    """图片文件名带会话名前缀，但正文里必须仍然只写 4 位编号。"""
     rows = prep([msg(3, '<msg><img aeskey="x"/></msg>', sender='wxid_a', lid='77')])
-    images = {'77': '0001.jpg'}
-    doc, recs = mdx.build_document(rows, {'wxid': 'w', 'title': 'T', 'is_group': False},
+    images = {'77': '群聊A_0001.jpg'}
+    doc, recs = mdx.build_document(rows, {'wxid': 'w', 'title': '群聊A', 'is_group': False},
                                    images)
     assert '[图片0001]' in doc
-    assert '_图片' in doc           # 头部说明图片位置
+    assert '图片群聊A' not in doc    # 正文不能把前缀吃进 [图片...] 里
+    assert '_图片' in doc            # 头部说明图片位置
+    assert '群聊A_图片\\群聊A_NNNN.jpg' in doc   # 头部说明真实文件名形态
+    assert recs[0]['image_index'] == '群聊A_0001.jpg'   # 语义不变（头部统计用）
 
 
 def test_document_without_images_has_no_image_dir_note():
@@ -119,6 +124,7 @@ def test_document_keeps_system_and_rich_types_readable():
 # ─────────────── export() 落盘 ───────────────
 
 def test_export_writes_md_and_numbered_images(tmp_path):
+    """不传前缀时的旧行为（纯编号）保留，供老调用点/老测试继续用。"""
     src = tmp_path / 'src'
     src.mkdir()
     # 造两张假图，文件名模拟 md5
@@ -168,6 +174,134 @@ def test_build_image_map_is_stable_when_one_message_has_two_images():
         r['image_file'] = 'x.jpg'
     m = mdx.build_image_map(rows)
     assert m == {'7': '0001.jpg', '8': '0002.jpg'}
+
+
+# ─────────────── 图片文件名带会话名前缀 ───────────────
+
+def test_build_image_map_prefixes_files_but_body_keeps_number():
+    """① 文件名带前缀 群聊A_0001.jpg，正文里仍然是 [图片0001]。"""
+    rows = prep([msg(1, 'a', sender='x', lid='1'),
+                 msg(3, '<msg><img/></msg>', sender='x', lid='2'),
+                 msg(3, '<msg><img/></msg>', sender='x', lid='4')])
+    rows[1]['image_file'] = 'aaa.jpg'
+    rows[2]['image_file'] = 'bbb.png'
+
+    m = mdx.build_image_map(rows, '群聊A')
+    assert m == {'2': '群聊A_0001.jpg', '4': '群聊A_0002.png'}
+
+    doc, recs = mdx.build_document(rows, {'wxid': 'g@chatroom', 'title': '群聊A',
+                                          'is_group': True}, m)
+    assert '[图片0001]' in doc and '[图片0002]' in doc
+    assert '图片群聊A_0001' not in doc      # 前缀不能进正文编号
+    assert '群聊A_图片\\群聊A_NNNN.jpg' in doc   # 头部要写明真实文件名形态
+    # image_index 语义不变：仍是 map 里的值
+    assert [r['image_index'] for r in recs if r.get('image_index')] == \
+        ['群聊A_0001.jpg', '群聊A_0002.png']
+
+
+def test_image_prefix_is_sanitized_and_bounded():
+    """前缀过长/含非法字符时要能安全落盘（会话名最长 80 字符，不能撑爆路径）。"""
+    rows = prep([msg(3, '<msg><img/></msg>', sender='x', lid='1')])
+    rows[0]['image_file'] = 'a.jpg'
+
+    name = mdx.build_image_map(rows, 'a/b:c*d?e' + 'x' * 40)['1']
+    pfx = name[: -len('_0001.jpg')]
+    assert name.endswith('_0001.jpg')
+    assert pfx.startswith('a_b_c_d_ex')      # 非法字符已清洗
+    assert not set(pfx) & set('\\/:*?"<>|')
+    assert len(pfx) <= mdx.IMAGE_PREFIX_MAX
+    assert mdx.IMAGE_PREFIX_MAX == 24
+    # 幂等：export() 会把已经清洗过的 base 再交进来一次，不能越洗越短
+    assert mdx._image_prefix(pfx) == pfx
+    assert mdx._image_prefix('') == ''
+    # 空前缀 = 旧行为
+    assert mdx.build_image_map(rows) == {'1': '0001.jpg'}
+
+
+def test_same_name_sessions_get_distinct_image_prefixes(tmp_path):
+    """③ 同名会话 base 去重成 同名 / 同名_2 时，两批图片名不能冲突。"""
+    assert be.unique_base(str(tmp_path), '同名') == '同名'   # 目录还空着
+
+    rows = prep([msg(3, '<msg><img/></msg>', sender='x', lid='1')])
+    rows[0]['image_file'] = 'aaa.jpg'
+    m1 = mdx.build_image_map(rows, '同名')
+    m2 = mdx.build_image_map(rows, '同名_2')
+    assert list(m1.values()) == ['同名_0001.jpg']
+    assert list(m2.values()) == ['同名_2_0001.jpg']
+    assert not (set(m1.values()) & set(m2.values())), '同名会话的图片名不能撞'
+
+    # 真落盘到同一个导出根目录，两个会话各写各的图目录
+    src = tmp_path / 'src'
+    src.mkdir()
+    (src / 'aaa.jpg').write_bytes(b'\xff\xd8\xff\xe0dummy')
+    out = tmp_path / 'out'
+    mdx.export(rows, str(out), {'wxid': 'w1', 'title': '同名', 'is_group': False},
+               image_map=m1, image_src_dir=str(src))
+    mdx.export(rows, str(out), {'wxid': 'w2', 'title': '同名_2', 'is_group': False},
+               image_map=m2, image_src_dir=str(src))
+    assert (out / '同名_图片' / '同名_0001.jpg').is_file()
+    assert (out / '同名_2_图片' / '同名_2_0001.jpg').is_file()
+    # 图片目录名不能被改动（batch_export.unique_base / clear_before 都靠它认领）
+    for d in ('同名_图片', '同名_2_图片'):
+        assert (out / d).is_dir()
+
+
+def test_export_writes_prefixed_image_names(tmp_path):
+    """② export() 落盘后目录里是 会话A_0001.jpg，且与正文引用一一对应。"""
+    src = tmp_path / 'src'
+    src.mkdir()
+    for n in ('aaaa.jpg', 'bbbb.jpg', 'cccc.png'):
+        (src / n).write_bytes(b'\xff\xd8\xff\xe0dummy')
+
+    rows = prep([
+        msg(1, '开始', sender='wxid_a', lid='1'),
+        msg(3, '<msg><img/></msg>', sender='wxid_a', lid='2'),
+        msg(3, '<msg><img/></msg>', sender='wxid_a', lid='3'),
+        msg(3, '<msg><img/></msg>', sender='wxid_a', lid='4'),
+    ])
+    rows[1]['image_file'] = 'aaaa.jpg'
+    rows[2]['image_file'] = 'bbbb.jpg'
+    rows[3]['image_file'] = 'cccc.png'
+
+    out = tmp_path / 'out'
+    # 故意不传 image_map：走 export() 内部 build_image_map(rows, base) 这条路
+    res = mdx.export(rows, str(out), {'wxid': 'w', 'title': '会话A', 'is_group': False},
+                     image_src_dir=str(src))
+
+    assert res['images'] == 3
+    img_dir = out / '会话A_图片'
+    files = sorted(p.name for p in img_dir.iterdir())
+    assert files == ['会话A_0001.jpg', '会话A_0002.jpg', '会话A_0003.png']
+
+    text = (out / '会话A.md').read_text(encoding='utf-8')
+    for i, name in enumerate(files, 1):
+        assert f'[图片{i:04d}]' in text, f'{name} 缺正文引用'
+        assert f'[图片{name}]' not in text, '正文不能写完整文件名'
+    # 正文引用条数 == 文件个数（一一对应）
+    assert len(re.findall(r'\[图片\d{4}\]', text)) == len(files)
+    assert '会话A_图片\\会话A_NNNN.jpg' in text   # 头部说明用的是真实前缀
+
+
+def test_batch_export_passes_deduped_base_as_image_prefix(tmp_path, monkeypatch):
+    """最危险的坑：batch_export 必须传 unique_base 之后的 base 当前缀。"""
+    seen = []
+    real = mdx.build_image_map
+
+    def spy(rows, prefix=''):
+        seen.append(prefix)
+        return real(rows, prefix)
+
+    monkeypatch.setattr(mdx, 'build_image_map', spy)
+    fake = FakeWCDB({'wxid_a': [msg(1, 'from a', sender='wxid_a', lid='1')],
+                     'wxid_b': [msg(1, 'from b', sender='wxid_b', lid='2')]})
+    sessions = [{'wxid': 'wxid_a', 'title': '同名'},
+                {'wxid': 'wxid_b', 'title': '同名'}]
+    be.export_sessions(fake, '', sessions, 'md', str(tmp_path), resolve_images=False)
+    # 每个会话这里会被调用两次：batch_export 显式调一次，export() 内部在没有图片、
+    # map 为空时还会兜底再调一次。关键是前缀必须已经去重 —— 若传的是去重前的 base，
+    # 两次都会是「同名」，第二个会话的图片就会覆盖第一个会话的。
+    assert seen, 'batch_export 没有调用 build_image_map'
+    assert set(seen) == {'同名', '同名_2'}, '必须用去重后的 base，否则同名会话图片互相覆盖'
 
 
 def test_export_cleans_illegal_filename_chars(tmp_path):

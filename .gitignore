@@ -30,6 +30,19 @@ key_status.txt
 *_图片/
 *.jsonl
 
+# ── v3.0 用户数据（程序运行期生成，绝不提交/发布）──
+# 会话标签：用户自己打的标签
+/会话标签.json
+/会话标签.json.tmp
+# 内嵌 DeepSeek 官网页的登录态（Chromium profile，里面有 cookie）
+/ds_profile/
+/.boot.log
+# 假官网页面的自检记录（跑 dsview/verify_mock.py 时生成）
+/dsview/mock/mock_events.jsonl
+
+# 发布操作便签（里面的路径是本机私事，不进仓库）
+/发布步骤-*.md
+
 # ── 编辑器 / 系统 ──
 .vscode/
 .idea/

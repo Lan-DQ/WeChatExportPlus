@@ -1,0 +1,8 @@
+{
+  "name": "dsview",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeepSeek 网页版宿主：本地文件批量挂载 / 自动发送 / 停止生成，并把窗口 HWND 报给 Python 侧内嵌",
+  "main": "main.js",
+  "productName": "dsview"
+}

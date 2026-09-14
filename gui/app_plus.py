@@ -28,6 +28,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 import tkinter as tk
 
 # ── 路径解析（PyInstaller onefile 下 __file__ 在临时解包目录，必须以 exe 为准）──
@@ -39,7 +40,8 @@ else:
 SCRIPTS_DIR = os.path.join(BASE, 'scripts')
 EXPORTERS_DIR = os.path.join(BASE, 'exporters')
 GUI_DIR = os.path.join(BASE, 'gui')
-for _p in (SCRIPTS_DIR, EXPORTERS_DIR, GUI_DIR):
+DS_BRIDGE_DIR = os.path.join(BASE, 'ds_bridge')
+for _p in (SCRIPTS_DIR, EXPORTERS_DIR, GUI_DIR, DS_BRIDGE_DIR, BASE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -51,15 +53,21 @@ if sys.stdout:
 
 import ui_theme as T            # noqa: E402
 import ui_widgets as W          # noqa: E402
+import session_tags             # noqa: E402
 
 ROOT = BASE
 DEFAULT_OUT = os.path.join(os.environ.get('USERPROFILE', BASE), 'Desktop', 'wx_export')
 OUT = DEFAULT_OUT
 KEY_FILE = os.path.join(OUT, 'key.txt')
 SETTINGS_FILE = os.path.join(ROOT, '.ui_settings')
+# 会话标签单独一份文件：.ui_settings 是逐行 key=value、非原子写，
+# 塞进会随数据量增长而变脆（详见 gui/session_tags.py 的说明）。
+TAGS_FILE = os.path.join(ROOT, session_tags.FILE_NAME)
+# 内嵌 DeepSeek 页签的用户数据目录（登录态存这里；**不能随发布包发出去**）
+DS_PROFILE_DIR = os.path.join(ROOT, 'ds_profile')
 
 APP_TITLE = '微信聊天记录批量导出工具'
-APP_VERSION = 'v2.2.0'
+APP_VERSION = 'v3.0.0'
 
 FORMAT_CHOICES = [
     ('Markdown 单文件（推荐）', 'md'),
@@ -84,6 +92,14 @@ FORMAT_HINTS = {
 FORMAT_DEFAULT = 'md'
 
 
+def _fmt_dur(sec):
+    """把秒数说成人话（进度窗显示剩余时间用）。"""
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f'{sec} 秒'
+    return f'{sec // 60} 分 {sec % 60} 秒'
+
+
 def load_saved_key():
     for path in (KEY_FILE, os.path.join(os.environ.get('USERPROFILE', 'C:'),
                                        'Desktop', 'wechat_export', 'WeChat', 'key.txt')):
@@ -98,22 +114,154 @@ def load_saved_key():
     return ''
 
 
-def find_xwechat_dirs():
+def _documents_dirs():
+    """可能的「文档」目录。
+
+    不能只会拼 `%USERPROFILE%\\Documents` —— 很多人把「文档」重定向到了 OneDrive
+    （`%USERPROFILE%\\OneDrive\\Documents` 或 `OneDrive - 公司名\\Documents`），
+    这时老写法那个路径根本不存在。
+    """
     home = os.environ.get('USERPROFILE', 'C:')
-    cands = [os.path.join(home, 'Documents', 'xwechat_files'),
-             os.path.join(home, 'Documents', 'WeChat Files')]
-    for letter in 'CDEFGH':
-        for sub in ('xwechat_files', 'WeChat Files',
-                    r'wxxinxi\xwechat_files', r'储存信息\xwechat_files'):
-            cands.append(f'{letter}:\\{sub}')
-    for d in cands:
-        if os.path.isdir(d):
+    out = [os.path.join(home, 'Documents')]
+    try:
+        import glob as _glob
+        out += _glob.glob(os.path.join(home, 'OneDrive*', 'Documents'))
+    except Exception:
+        pass
+    return out
+
+
+def _wechat_configured_dirs():
+    """微信**自己记录**的数据存储位置（用户改过位置时，只有这里是对的）。
+
+    - 微信 3.x：注册表 `HKCU\\Software\\Tencent\\WeChat\\FileSavePath`
+    - 微信 4.x：`%APPDATA%\\Tencent\\xwechat\\config\\*.ini`
+      （实测内容就是 `MyDocument:`，和 3.x 同一套约定；改过位置就是自定义路径）
+
+    `MyDocument:` / `MyDocuments:` 都表示"文档"目录。
+    读注册表/文件失败一律忽略，绝不影响主流程。
+    """
+    raw = []
+    try:
+        import winreg
+        for sub in (r'Software\Tencent\WeChat', r'Software\Tencent\Weixin',
+                    r'Software\Tencent\WeChat4'):
             try:
-                for e in os.listdir(d):
-                    if e.startswith('wxid_') and os.path.isdir(os.path.join(d, e)):
-                        return d
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as k:
+                    for name in ('FileSavePath', 'DataSavePath', 'SavePath'):
+                        try:
+                            v, _t = winreg.QueryValueEx(k, name)
+                            if isinstance(v, str) and v.strip():
+                                raw.append(v.strip())
+                        except OSError:
+                            pass
             except OSError:
                 pass
+    except Exception:
+        pass
+    try:
+        cfg = os.path.join(os.environ.get('APPDATA', ''), 'Tencent', 'xwechat', 'config')
+        if os.path.isdir(cfg):
+            for fn in os.listdir(cfg):
+                if not fn.lower().endswith('.ini'):
+                    continue
+                try:
+                    with open(os.path.join(cfg, fn), encoding='utf-8',
+                              errors='ignore') as f:
+                        v = f.read().strip()
+                except OSError:
+                    continue
+                if v:
+                    raw.append(v)
+    except Exception:
+        pass
+
+    out = []
+    for v in raw:
+        v = str(v).strip().strip('"').strip()
+        if not v:
+            continue
+        low = v.lower().rstrip('\\/')
+        if low in ('mydocument:', 'mydocument', 'mydocuments:', 'mydocuments'):
+            out.extend(_documents_dirs())
+        elif re.match(r'^[a-zA-Z]:', v) or v.startswith('\\\\'):
+            out.append(os.path.expandvars(v))
+    return out
+
+
+def _is_wechat_data_dir(d):
+    """判定标准：里面有 `wxid_xxx` 子文件夹（老规矩，避免误选到别的目录）。"""
+    try:
+        for e in os.listdir(d):
+            if e.startswith('wxid_') and os.path.isdir(os.path.join(d, e)):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _resolve_wechat_data(root):
+    """在 root 或它的下一层找微信数据目录；找不到返回 ''。"""
+    if root and os.path.isdir(root):
+        if _is_wechat_data_dir(root):
+            return root
+        for sub in ('xwechat_files', 'WeChat Files'):
+            p = os.path.join(root, sub)
+            if os.path.isdir(p) and _is_wechat_data_dir(p):
+                return p
+    return ''
+
+
+def find_xwechat_dirs(extra_roots=()):
+    """找微信数据目录（返回"含 wxid_xxx 子文件夹"的那一层），找不到返回 ''。
+
+    查找顺序（越靠前越可信）：
+      1. **微信自己记录的位置**（注册表 / `%APPDATA%\\Tencent\\xwechat\\config\\*.ini`）
+         —— 用户把数据挪到自定义目录时，只有这里能对上；
+      2. 「文档」目录（含 OneDrive 重定向那几种）；
+      3. 各盘符根目录**及其下一层**（覆盖 `D:\\我的资料\\xwechat_files` 这类）。
+
+    以前只查几个固定位置、且只认 C~H 盘的根目录，所以用户一改存储位置就得手动点
+    「浏览」——issue #1 就是这个原因。
+    """
+    for r in list(extra_roots) + _wechat_configured_dirs():
+        hit = _resolve_wechat_data(r)
+        if hit:
+            return hit
+
+    for d in _documents_dirs():
+        for sub in ('xwechat_files', 'WeChat Files'):
+            p = os.path.join(d, sub)
+            if os.path.isdir(p) and _is_wechat_data_dir(p):
+                return p
+
+    # 各盘符：根目录 + 下一层（下一层能覆盖"我自己建了个文件夹放微信数据"）
+    skip = {'windows', 'program files', 'program files (x86)', 'programdata',
+            '$recycle.bin', 'system volume information', 'recovery',
+            'perflogs', 'users', 'appdata'}
+    for letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+        drive = f'{letter}:\\'
+        if not os.path.isdir(drive):
+            continue
+        for name in ('xwechat_files', 'WeChat Files',
+                     r'wxxinxi\xwechat_files', r'储存信息\xwechat_files'):
+            p = os.path.join(drive, name)
+            if os.path.isdir(p) and _is_wechat_data_dir(p):
+                return p
+        try:
+            entries = list(os.scandir(drive))
+        except OSError:
+            continue
+        for ent in entries:
+            try:
+                if not ent.is_dir() or ent.name.lower() in skip:
+                    continue
+            except OSError:
+                continue
+            for name in ('xwechat_files', 'WeChat Files'):
+                p = os.path.join(ent.path, name)
+                if os.path.isdir(p) and _is_wechat_data_dir(p):
+                    return p
     return ''
 
 
@@ -163,6 +311,25 @@ class App:
         # 覆盖模式开关（记住用户上次的选择）
         self._clear_before = self.settings.get('clear_before', '0') == '1'
 
+        # 会话标签：单独一份 JSON。读坏了也只是标签没了，不会连累主题/目录等设置。
+        self.tag_store = session_tags.TagStore(TAGS_FILE)
+        # 内嵌 DeepSeek 页签：宿主**懒启动** —— 不点那个页签就绝不拉起 electron。
+        self.ds = None
+        self.ds_out_root = self.settings.get('ds_root', '')
+        self.ds_units = []
+        self.ds_selected = set()
+        # 只发文档（默认开：图片占绝大多数体积、且官网单条消息更容易被它们挤爆）
+        self._ds_docs_only = self.settings.get('ds_docs_only', '1') == '1'
+        # 每批文件数（默认 20，实测上限在 30~40 之间）
+        try:
+            self._ds_limit = int(self.settings.get('ds_batch', str(self.DS_LIMIT)))
+        except ValueError:
+            self._ds_limit = self.DS_LIMIT
+        if self._ds_limit not in self.DS_LIMIT_CHOICES:
+            self._ds_limit = self.DS_LIMIT
+        self._ds_visible = False
+        self._ds_win = None
+
         self.key = load_saved_key() or None
         self.wcdb = None
         self.sessions = []
@@ -178,6 +345,9 @@ class App:
         self.sf = W.Surface(self.root, self.theme,
                             T.find_bg_image(BASE))
         self.sf.font = T.pick_font(self.root)
+        # 控件回调里抛异常时别再静默吞掉（写日志 + 提示一次）
+        self._last_ui_err = ''
+        self.sf.on_error = self._ui_error
         self.root.update_idletasks()
         self.sf.redraw_bg()
 
@@ -186,6 +356,10 @@ class App:
         self.root.bind('<Escape>', lambda e: self._close_popups())
 
         self.build_home()
+        # 自动化/自测用：设 WXEXPORT_START_PAGE=ds 就直接进「DeepSeek 官网」页签
+        # （合成的鼠标消息进不了自绘输入层，所以留一个入口来验证官网页的生命周期）
+        if os.environ.get('WXEXPORT_START_PAGE') == 'ds':
+            self.root.after(250, self.build_ds)
 
     # ────────────────────── 基础设施 ──────────────────────
 
@@ -207,7 +381,15 @@ class App:
           1. 删掉除背景外的所有 Canvas 图元（不能靠 tag —— 手画的图元没打标签）；
           2. 销毁真实 tk 控件（Entry 是叠在 Canvas 上的，不随图元一起消失）；
           3. 清空自绘控件的引用表与动画队列（否则旧动画还在跑，去操作已删除的图元）。
+
+        另外：**离开官网页时必须把内嵌浏览器藏起来**。它是独立的 Win32 子窗口，
+        不随 Canvas 图元一起消失。这个判断必须放在这里，因为 build_home /
+        build_sessions 会被很多地方直接调用（不只是 _rebuild_page 那条路），
+        只挂在 _rebuild_page 上会漏 —— 实际就漏了：退出官网页后网页还留在那儿。
+        各页构建函数都是先设 self.page 再调本函数，所以这里能拿到目标页。
         """
+        if getattr(self, 'page', '') != 'ds':
+            self._ds_leave()
         cv = self.sf.canvas
         for iid in cv.find_all():
             if '__bg' not in cv.gettags(iid):
@@ -261,12 +443,74 @@ class App:
         self._clear_page()          # 删图元 + 注销控件 + 清动画（幂等）
         self.sf.size = (0, 0)       # 让背景按新尺寸重算
         self.sf.redraw_bg()
-        (self.build_home if self.page == 'home' else self.build_sessions)()
+        self._rebuild_page()
+
+    def _page_builder(self):
+        """当前页面对应的构建函数。"""
+        return {'home': self.build_home, 'sessions': self.build_sessions,
+                'ds': self.build_ds}.get(self.page, self.build_home)
+
+    def _rebuild_page(self):
+        """按 self.page 重建整页。
+
+        换页前先把内嵌浏览器藏起来 —— 它是**独立的 Win32 子窗口**，
+        不随 Canvas 图元一起被删，不藏就会浮在新页面上。
+        （_clear_page 里也有一道同样的保险，见那里的说明。）
+
+        发送中禁止切页：浏览器一被隐藏，Chromium 会把后台页降频，上传/发送会卡住。
+        """
+        if getattr(self, '_ds_sending', False) and self.page != 'ds':
+            self.page = 'ds'
+            self.toast('正在发送到 DeepSeek，暂时不能切页（可点进度窗的「取消」）',
+                       'warn', 3500)
+            return
+        if self.page != 'ds':
+            self._ds_leave()
+        self._page_builder()()
 
     def _close_popups(self):
         for w in self._widgets:
             if hasattr(w, 'close'):
                 w.close()
+
+    def _ui_error(self, exc):
+        """界面回调里抛出的异常：写 `.ui_errors.log` + 弹一次提示。
+
+        为什么需要：自绘控件的回调是在 Surface.dispatch_input 里被调用的，
+        以前那里 `except Exception: pass`。后果是"点了没反应/弹出一个空框"
+        这类问题完全没有线索（标签弹窗就是这么被坑过一次）。
+        """
+        import traceback
+        txt = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+        try:
+            with open(os.path.join(ROOT, '.ui_errors.log'), 'a',
+                      encoding='utf-8') as f:
+                f.write(f'{datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")} {txt}\n')
+                f.write(traceback.format_exc() + '\n')
+        except OSError:
+            pass
+        if txt != self._last_ui_err:
+            self._last_ui_err = txt
+            try:
+                self.toast(f'界面出错了（已记到 .ui_errors.log）：{txt[:64]}',
+                           'err', 5000)
+            except Exception:
+                pass
+
+    def _toast_rect(self, w=340, h=46):
+        """提示框该摆在哪儿。
+
+        ⚠️ 官网页签上右下角会被**内嵌浏览器挡住** —— 浏览器是独立的 Win32 子窗口，
+        永远画在 Tk 画布之上，画布上画的提示它盖得住。所以那里必须挪到浏览器
+        没占的那一列（左边清单区）。抽成纯函数是为了能被测试直接断言。
+        """
+        if self.page == 'ds' and self._ds_visible:
+            w = min(w, self.DS_LEFT_W + 40)
+            x1 = 38
+            y2 = self.H - 46                     # 让开最下面那行日志
+            return x1, y2 - h, x1 + w, y2
+        x2, y2 = self.W - 26, self.H - 26
+        return x2 - w, y2 - h, x2, y2
 
     def toast(self, msg, kind='info', ms=2600):
         """右下角浮出提示，几秒后自己消失（比弹窗打断感小）。"""
@@ -276,8 +520,7 @@ class App:
         cv = self.sf.canvas
         cv.delete('toast')
         w, h = 340, 46
-        x2, y2 = self.W - 26, self.H - 26
-        x1, y1 = x2 - w, y2 - h
+        x1, y1, x2, y2 = self._toast_rect(w, h)
         self.sf.draw_panel(x1, y1, x2, y2, 12, 0.96, border=True, tags='toast')
         T.round_rect_items(cv, x1, y1, x1 + 4, y2, 2, col, '', 0, tags=('toast',))
         cv.create_text(x1 + 20, (y1 + y2) / 2, text=msg, anchor='w',
@@ -334,10 +577,29 @@ class App:
         th = self.theme
         self.sf.text(38, 44, APP_TITLE, 18, th['text'], True)
         self.sf.text(38, 70, subtitle, 10, th['text_dim'])
+        # 页签入口：DeepSeek 官网页 ⇄ 导出页。自绘界面里没有真 tab 控件，
+        # 用两个按钮当页签（位置和主题按钮并排，右侧留 8px 间隙）。
+        if self.page == 'ds':
+            tab_label, tab_cmd = '← 返回导出页', self._leave_ds
+        else:
+            tab_label, tab_cmd = '💬 DeepSeek 官网', self.build_ds
+        self._widgets.append(
+            W.Button(self.sf, self.W - 300, 34, 142, 38, tab_label, kind='ghost',
+                     font_size=10, command=tab_cmd, hover_dur=0.12))
         lbl = '🌙 深色' if self.theme['name'] == 'light' else '☀ 浅色'
         self._widgets.append(
             W.Button(self.sf, self.W - 150, 34, 112, 38, lbl, kind='ghost',
                      font_size=10, command=self.toggle_theme, hover_dur=0.12))
+
+    def _leave_ds(self):
+        """从官网页返回：有会话就回会话页，否则回首页。"""
+        if getattr(self, '_ds_sending', False):
+            self.toast('正在发送，等它发完（或点进度窗的「取消」）再切页', 'warn', 3200)
+            return
+        if self.sessions:
+            self.build_sessions()
+        else:
+            self.build_home()
 
     def toggle_theme(self):
         name = 'dark' if self.theme['name'] == 'light' else 'light'
@@ -354,7 +616,7 @@ class App:
         self.sf.set_theme(self.theme)
         self.sf.font = T.pick_font(self.root)
         self._widgets.clear()
-        (self.build_home if self.page == 'home' else self.build_sessions)()
+        self._rebuild_page()
 
     def _fit_text(self, s, max_px, size):
         """按像素宽度裁剪文本，超出时保留开头与结尾（路径的关键信息在两头）。
@@ -702,24 +964,30 @@ class App:
                           'preview': str(s.get('summary', '') or '')[:46],
                           'time': str(ts)[:16],
                           'group': str(w).endswith('@chatroom'),
+                          'tags': self.tag_store.tags_of(w),
                           'sel': w in getattr(self, '_selected', set())})
         # 有消息的排前面
         items.sort(key=lambda it: 0 if it['preview'] else 1)
         return items
 
     def build_sessions(self):
+        # 先认领页面 + 收起内嵌网页，再做"有没有数据"的判断 ——
+        # 否则在没有会话数据时会提前 return，官网页的浏览器窗口就留在屏幕上了
+        # （实测踩到：切回会话页，网页还在）。
+        self.page = 'sessions'
+        self._ds_leave()
         if not self.sessions:
             self.toast('还没有会话数据，请先「连接数据库」', 'warn')
             return
-        self.page = 'sessions'
         self._clear_page()
         th = self.theme
         if not hasattr(self, '_selected'):
             self._selected = set()
 
         self.draw_header(f'共 {len(self.sessions)} 个会话 · 勾选后统一导出')
-        # 选中数量显示在标题栏右侧（不占列表表头，避免和勾选框挤在一起）
-        self.sf.text(self.W - 176, 66, '尚未勾选', 10, th['accent'], bold=True,
+        # 选中数量显示在标题栏右侧（不占列表表头，避免和勾选框挤在一起）。
+        # 右边要给「官网对话」页签按钮留位置，所以结束在 W-312 而不是 W-176。
+        self.sf.text(self.W - 312, 66, '尚未勾选', 10, th['accent'], bold=True,
                      anchor='e', tags='selhint')
 
         # 返回 + 选择操作
@@ -737,6 +1005,10 @@ class App:
                                           kind='ghost', font_size=10, radius=9,
                                           command=cb, hover_dur=0.12))
             bx += w_ + 8
+        # 「打包成标签」：把当前勾选的会话一次性打上某个标签（可选已有的，也可新建）
+        self._widgets.append(W.Button(self.sf, bx, top, 118, 34, '🏷 打包成标签',
+                                      kind='ghost', font_size=10, radius=9,
+                                      command=self.open_tag_dialog, hover_dur=0.12))
 
         # 搜索框（放在列表右上）
         self.search_var = tk.StringVar()
@@ -747,8 +1019,14 @@ class App:
         self._search_ph = self.sf.text(self.W - 38 - 300 + 14, top + 17,
                                        '搜索会话…', 10, th['text_faint'])
 
+        # 标签行：点一个标签 = 把「带这个标签的会话」全部勾上（替换当前勾选）
+        row_y = top + 42
+        CHIP_H = 26
+        self._chip_y = row_y
+        self._draw_tag_chips(row_y, CHIP_H)
+
         # 列表
-        list_top = top + 48
+        list_top = row_y + CHIP_H + 10
         list_h = self.H - list_top - 200
         self.list = W.CheckList(self.sf, 38, list_top, self.W - 76, list_h,
                                 on_toggle=self._on_toggle, on_open=self.show_chat)
@@ -858,6 +1136,230 @@ class App:
         self.list.invert()
         self._selected = {it['wxid'] for it in self.list.items if it.get('sel')}
         self._update_sel_label()
+
+    # ────────────────────── 会话标签 ──────────────────────
+
+    def _text_px(self, s, size):
+        """文本像素宽度（用来给 chip 定宽；取不到就按每字 8px 估）。"""
+        try:
+            import tkinter.font as tkfont
+            return tkfont.Font(family=self.sf.font, size=size).measure(str(s))
+        except Exception:
+            return len(str(s)) * 8
+
+    def _draw_tag_chips(self, y, h):
+        """画标签行：每个标签一个 chip，点一下就把带该标签的会话全部勾上。
+
+        chip 就是自绘 Button（没有现成的 chip 控件），标签多的时候按可用宽度
+        截断，最后一个 chip 固定是「管理」，点开标签管理窗。
+        """
+        th = self.theme
+        tags = self.tag_store.all_tags()
+        counts = self.tag_store.counts()
+        x = 38
+        right_limit = self.W - 38 - 120          # 给「管理」留位置
+        if not tags:
+            self.sf.text(38, y + h // 2,
+                         '还没有标签：「勾选几个会话 → 🏷 打包成标签」，'
+                         '下次点标签就能一键勾上这些会话',
+                         9, th['text_faint'])
+        for t in tags:
+            label = f'#{t}' + (f' {counts.get(t, 0)}' if counts.get(t) else '')
+            w_ = min(170, max(56, self._text_px(label, 9) + 26))
+            if x + w_ > right_limit:
+                self.sf.text(x + 4, y + h // 2, '…', 10, th['text_faint'])
+                break
+            self._widgets.append(W.Button(
+                self.sf, x, y, w_, h, label, kind='ghost', font_size=9, radius=9,
+                command=(lambda tag=t: self._sel_by_tag(tag)), hover_dur=0.12))
+            x += w_ + 6
+        # 「管理」恒在最右：新建/删除/清空标签都从这里进
+        self._widgets.append(W.Button(
+            self.sf, self.W - 38 - 110, y, 110, h, '🏷 标签管理', kind='ghost',
+            font_size=9, radius=9, command=self.open_tag_dialog, hover_dur=0.12))
+
+    def _sel_by_tag(self, tag):
+        """按标签勾选：**替换**当前勾选（用户明确要的行为）。"""
+        wxids = self.tag_store.wxids_with(tag)
+        if not wxids:
+            self.toast(f'没有会话带「{tag}」标签', 'warn')
+            return
+        self.list.set_selected_wxids(wxids)
+        self._selected = {it['wxid'] for it in self.list.items if it.get('sel')}
+        self._update_sel_label()
+        self.toast(f'已按标签「{tag}」勾选 {len(self._selected)} 个会话', 'ok')
+
+    def _refresh_sessions(self, keep_search=True, keep_scroll=True):
+        """标签改动后刷新会话页（整页重建最省心，也避免控件表/图元残留）。
+
+        重建会丢掉搜索词与滚动位置，这里手动续上。
+        """
+        kw = self.search_var.get() if (keep_search and getattr(self, 'search_var', None)) else ''
+        scroll = self.list.scroll if (keep_scroll and getattr(self, 'list', None)) else 0
+        self.build_sessions()
+        if kw:
+            self.search_var.set(kw)
+            self._on_search()
+        if scroll and getattr(self, 'list', None):
+            self.list.scroll = min(scroll, max(0, len(self.list.view) - 1))
+            self.list.draw()
+
+    def _apply_tag(self, tag, wxids):
+        """把标签贴到这批会话上并落盘。"""
+        tag = session_tags.clean_tag(tag)
+        if not tag:
+            self.toast('标签名不能为空', 'err')
+            return False
+        if not wxids:
+            self.toast('请先勾选要打标签的会话', 'warn')
+            return False
+        added = self.tag_store.assign(wxids, tag)
+        if not self.tag_store.save():
+            self.toast('标签保存失败（文件可能被占用），本次改动没有落盘', 'err', 4000)
+            return False
+        self.toast(f'已给 {len(wxids)} 个会话打上「{tag}」（新增 {added} 个）', 'ok')
+        self._refresh_sessions()
+        return True
+
+    def _untag_selection(self, tag):
+        wxids = sorted(self._selected)
+        if not wxids:
+            self.toast('请先勾选会话', 'warn')
+            return
+        self.tag_store.untag(wxids, tag)
+        self.tag_store.save()
+        self.toast(f'已从 {len(wxids)} 个会话上摘掉「{tag}」', 'ok')
+        self._refresh_sessions()
+
+    def _delete_tag(self, tag):
+        n = self.tag_store.delete_tag(tag)
+        self.tag_store.save()
+        self.toast(f'已删除标签「{tag}」（影响 {n} 个会话）', 'ok')
+        self._refresh_sessions()
+
+    def open_tag_dialog(self):
+        """标签窗：给勾选的会话打标签。
+
+        布局（自上而下）：
+          1. 顶部一大行：**输入新标签名** → 「新建并贴上」（回车也行）；
+          2. 已有标签列表：每个标签一行，三件事都能做 ——
+             「贴到勾选的会话」/「只勾选这些会话」/「删除标签」；
+          3. 底部：清除勾选会话的标签、关闭。
+
+        用普通 tk 控件放在独立 Toplevel 里（和自绘 Canvas 无关）。
+        ⚠️ 这里任何一处抛异常，用户看到的就是"跳出一个空框、点不动" ——
+        因为 Button 的 command 是在 Surface 分发层被调用的（异常已改为上报日志）。
+        """
+        th = self.theme
+        sel = sorted(self._selected)
+        win = tk.Toplevel(self.root)
+        win.title('会话标签')
+        win.geometry('560x460')
+        win.minsize(500, 380)
+        win.configure(bg=T.rgb2hex(th['bg_top']))
+        win.transient(self.root)
+        win.lift()
+        if self._ico:
+            try:
+                win.iconbitmap(self._ico)
+            except Exception:
+                pass
+
+        bg = T.rgb2hex(th['bg_top'])
+        fg = T.rgb2hex(th['text'])
+        dim = T.rgb2hex(th['text_dim'])
+        accent = T.rgb2hex(th['accent'])
+        font = self.sf.font
+
+        head = tk.Frame(win, bg=bg)
+        head.pack(fill='x', padx=18, pady=(16, 4))
+        tk.Label(head, text=f'已勾选 {len(sel)} 个会话', bg=bg, fg=accent,
+                 font=(font, 12, 'bold')).pack(side='left')
+        tk.Label(head, text='（勾选变化后重新打开这个窗口即可）', bg=bg, fg=dim,
+                 font=(font, 8)).pack(side='left', padx=(8, 0))
+
+        # ① 新建
+        tk.Label(win, text='① 给这批会话新建一个标签（输入名字后回车或点右边按钮）',
+                 bg=bg, fg=dim, font=(font, 9)).pack(anchor='w', padx=18, pady=(10, 4))
+        line = tk.Frame(win, bg=bg)
+        line.pack(fill='x', padx=18)
+        var = tk.StringVar()
+        ent = tk.Entry(line, textvariable=var, font=(font, 12))
+        ent.pack(side='left', fill='x', expand=True, ipady=5)
+
+        def create(_e=None):
+            if not sel:
+                self.toast('还没有勾选会话', 'warn')
+                return
+            if self._apply_tag(var.get(), sel):
+                win.destroy()
+
+        tk.Button(line, text='新建并贴上', font=(font, 10), relief='flat',
+                  cursor='hand2', bg=accent, fg='#ffffff', activebackground=accent,
+                  command=create).pack(side='left', padx=(8, 0))
+        ent.bind('<Return>', create)
+        ent.focus_set()
+
+        # ② 已有标签
+        tk.Label(win, text='② 或者用已有标签（可以直接把它的会话集合勾上）',
+                 bg=bg, fg=dim, font=(font, 9)).pack(anchor='w', padx=18, pady=(14, 4))
+        box = tk.Frame(win, bg=bg)
+        box.pack(fill='both', expand=True, padx=18)
+        tags = self.tag_store.all_tags()
+        counts = self.tag_store.counts()
+        if not tags:
+            tk.Label(box, text='（还没有标签）', bg=bg, fg=dim,
+                     font=(font, 9)).pack(anchor='w')
+
+        def apply_existing(tag):
+            if not sel:
+                self.toast('还没有勾选会话', 'warn')
+                return
+            if self._apply_tag(tag, sel):
+                win.destroy()
+
+        def select_only(tag):
+            win.destroy()
+            self._sel_by_tag(tag)
+
+        for t in tags:
+            row = tk.Frame(box, bg=bg)
+            row.pack(fill='x', pady=2)
+            tk.Label(row, text=f'#{t}', bg=bg, fg=accent, width=10, anchor='w',
+                     font=(font, 10, 'bold')).pack(side='left')
+            tk.Label(row, text=f'{counts.get(t, 0)} 个会话', bg=bg, fg=dim,
+                     width=9, anchor='w', font=(font, 9)).pack(side='left')
+            tk.Button(row, text='贴到勾选的会话', font=(font, 9), relief='flat',
+                      cursor='hand2',
+                      command=(lambda tag=t: apply_existing(tag))).pack(side='left')
+            tk.Button(row, text='只勾选这些会话', font=(font, 9), relief='flat',
+                      cursor='hand2',
+                      command=(lambda tag=t: select_only(tag))).pack(side='left',
+                                                                     padx=(6, 0))
+            tk.Button(row, text='删除', font=(font, 9), relief='flat', fg='#c0392b',
+                      cursor='hand2',
+                      command=(lambda tag=t: (self._delete_tag(tag), win.destroy()))
+                      ).pack(side='right')
+
+        # ③ 清除
+        foot = tk.Frame(win, bg=bg)
+        foot.pack(fill='x', padx=18, pady=(8, 14))
+        tk.Button(foot, text='清除这批会话的全部标签', font=(font, 10), relief='flat',
+                  cursor='hand2',
+                  command=lambda: (self._clear_tags_of_selection(), win.destroy())
+                  ).pack(side='left')
+        tk.Button(foot, text='关闭', font=(font, 10), relief='flat',
+                  cursor='hand2', command=win.destroy).pack(side='right')
+
+    def _clear_tags_of_selection(self):
+        wxids = sorted(self._selected)
+        if not wxids:
+            self.toast('请先勾选会话', 'warn')
+            return
+        self.tag_store.clear(wxids)
+        self.tag_store.save()
+        self.toast(f'已清除 {len(wxids)} 个会话的标签', 'ok')
+        self._refresh_sessions()
 
     def pick_export_root(self):
         from tkinter import filedialog
@@ -998,8 +1500,25 @@ class App:
         cancel_btn.pack(side='left', padx=(0, 8))
         open_btn = ttk.Button(bf, text='打开导出目录', width=14, state='disabled')
         open_btn.pack(side='left', padx=8)
+        # 导出完顺手就能投喂：直接把这次导出目录填进官网页的发送清单
+        send_btn = ttk.Button(bf, text='→ 去官网发送', width=14, state='disabled')
+        send_btn.pack(side='left', padx=8)
         close_btn = ttk.Button(bf, text='关闭', width=10, state='disabled')
         close_btn.pack(side='left', padx=8)
+
+        def go_send():
+            root_dir = result.get('root', '')
+            if not os.path.isdir(root_dir):
+                return
+            self.ds_out_root = root_dir
+            self.ds_units = []
+            self.settings['ds_root'] = root_dir
+            try:
+                save_settings(self.settings)
+            except Exception:
+                pass
+            win.destroy()
+            self.build_ds()
 
         def on_cancel():
             cancel['v'] = True
@@ -1053,6 +1572,8 @@ class App:
             open_btn.config(state='normal',
                             command=lambda: os.startfile(root_dir)
                             if os.path.isdir(root_dir) else None)
+            send_btn.config(state='normal' if os.path.isdir(root_dir) else 'disabled',
+                            command=go_send)
             self.toast(f'导出完成：成功 {len(ok)} 个', 'ok')
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1148,6 +1669,682 @@ class App:
         except Exception as e:
             self.toast(f'无法打开：{e}', 'err')
 
+    # ────────────────────── DeepSeek 官网页 ──────────────────────
+
+    DS_LEFT_W = 330          # 左栏（发送清单）宽度
+    # 每批文件数：**默认 30**（用户定）。
+    # 注意别再往上调：实测单条消息 40 个附件就会被官网拒收（每个附件显示
+    # "服务器繁忙"、整条消息报"请删除异常文件再发送"），30 是实测的安全上限。
+    DS_LIMIT = 30
+    DS_LIMIT_CHOICES = [10, 20, 30]
+    # 每个附件在"挂上"之后还要等多久才点发送（用户定：文档 0.5 秒、图片 0.3 秒）
+    DOC_SETTLE_MS = 500
+    IMG_SETTLE_MS = 300
+
+    def _ds_rect(self):
+        """内嵌浏览器在主窗口客户区里占的矩形（canvas 坐标 = 客户区坐标）。"""
+        x = 38 + self.DS_LEFT_W + 14
+        y = 160
+        w = max(320, self.W - x - 38)
+        h = max(220, self.H - y - 38)
+        return x, y, w, h
+
+    def _ds_log(self, msg):
+        """宿主进程/发送过程的日志：写到窗口底部一行，同时留在 self._ds_lines。"""
+        line = str(msg)[:120]
+        self._ds_lines = (getattr(self, '_ds_lines', []) + [line])[-60:]
+        try:
+            self.sf.canvas.itemconfigure('dslog', text=line)
+        except Exception:
+            pass
+
+    def _ds_apply_theme(self):
+        """把软件当前的深浅色同步给内嵌网页（官网自己也有两套配色）。
+
+        走 Electron 的 nativeTheme.themeSource —— 页面里的
+        `prefers-color-scheme` 媒体查询会跟着变，官网的配色也就跟着换了。
+        """
+        if not self.ds or not self.ds.running:
+            return
+        mode = 'dark' if self.theme['name'] == 'dark' else 'light'
+        try:
+            self.ds.set_theme(mode)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def build_ds(self):
+        """DeepSeek 官网页：左栏选要发的东西，右边直接就是官网（真嵌入）。"""
+        self.page = 'ds'
+        self._clear_page()
+        th = self.theme
+        self.draw_header(f'内嵌 DeepSeek 官网 · 按批自动投喂（每批 ≤{self._ds_limit} 个文件）')
+
+        top = 96
+        self._widgets.append(W.Button(self.sf, 38, top, 150, 34, '选择导出文件夹',
+                                      kind='primary', font_size=10, radius=9,
+                                      command=self._ds_pick_root, hover_dur=0.12))
+        bx = 196
+        for label, cb, w_ in (('全选', lambda: self._ds_sel_all(True), 72),
+                              ('全不选', lambda: self._ds_sel_all(False), 76),
+                              ('演练分批', lambda: self._ds_send(dry_run=True), 92),
+                              ('诊断', self._ds_diag, 72)):
+            self._widgets.append(W.Button(self.sf, bx, top, w_, 34, label,
+                                          kind='ghost', font_size=10, radius=9,
+                                          command=cb, hover_dur=0.12))
+            bx += w_ + 8
+        self.btn_ds_send = W.Button(self.sf, self.W - 38 - 170, top, 170, 34,
+                                    '🚀 开始发送', kind='primary', font_size=11,
+                                    radius=9, command=self._ds_send)
+        self._widgets.append(self.btn_ds_send)
+
+        # 说明行（勾选统计）+ 右侧醒目警示，各占一行（挤在一行会互相压字）
+        self.sf.text(38, 132, '', 9, th['text_dim'], tags='dshint')
+        # ⚠️ 官网对"单条消息里的附件数量"很敏感：实测一批 40 个附件就会被拒收
+        # （每个附件显示"服务器繁忙"、整条消息报"请删除异常文件再发送"）。
+        # 图片尤其容易触发，所以这条放最显眼的位置（浏览器区域之外）。
+        self.sf.text(self.W - 38, 148,
+                     '⚠ 一批附件别超 30 个（图片尤其容易触发官网「服务器繁忙」）'
+                     '—— 建议只发文档，或点左下角调小每批数量',
+                     9, th['warn'], anchor='e', tags='dswarn')
+        # 导出路径放左栏底部（浏览器盖不到那一片）
+        self.sf.text(38, self.H - 108, '', 8, th['text_faint'], tags='dspath')
+        # 底部一行日志
+        self.sf.text(38, self.H - 24, '', 8, th['text_faint'], tags='dslog')
+
+        # 左栏：发送清单（复用会话页那套 CheckList）
+        list_y = 164
+        # 底部要给「只发文档 / 每批数量」两个选项留一行（它们必须待在 x<382 的左栏里：
+        # 内嵌浏览器是独立子窗口、永远盖在画布之上，放在右边会被它挡住点不到）
+        list_h = max(120, self.H - list_y - 124)
+        self.list = W.CheckList(self.sf, 38, list_y, self.DS_LEFT_W, list_h,
+                                on_toggle=self._ds_on_toggle, on_open=None,
+                                header='发送清单')
+        self.list.set_items(self._ds_items())
+        self._widgets.append(self.list)
+
+        # 选项行（左下角，浏览器盖不到）
+        op_y = self.H - 92
+        self._docs_cb = W.Checkbox(
+            self.sf, 38, op_y + 3, 176, '只发文档（建议）',
+            value=bool(self._ds_docs_only), on_change=self._ds_on_docs_only,
+            font_size=9)
+        self._widgets.append(self._docs_cb)
+        # 每批数量用**点击循环**的按钮，不用下拉框：下拉展开的浮层会被内嵌浏览器挡住
+        self._batch_btn = W.Button(
+            self.sf, 224, op_y, 144, 24, self._batch_label(), kind='ghost',
+            font_size=9, radius=8, command=self._ds_cycle_batch, hover_dur=0.12)
+        self._widgets.append(self._batch_btn)
+
+        # 右侧：浏览器区域（先画一个占位框，真窗口盖在上面）
+        x, y, w, h = self._ds_rect()
+        self.sf.draw_panel(x - 6, y - 6, x + w + 6, y + h + 6, 14, 0.55)
+        self.sf.text(x + w / 2, y + h / 2, '正在准备内嵌浏览器…', 10,
+                     th['text_faint'], anchor='center', tags='dsplaceholder')
+
+        self._ds_update_hint()
+        # 上次用过的导出目录还在的话自动列出来，省得每次重新选
+        if not self.ds_units and os.path.isdir(self.ds_out_root or ''):
+            self._ds_scan()
+        self.root.after(120, self._ds_boot)
+
+    def _ds_boot(self):
+        """页签画完再启动宿主：避免拉起 electron 时界面还是一片空白。"""
+        if self.page != 'ds':
+            return
+        err = self._ds_ensure_host()
+        if err:
+            x, y, w, h = self._ds_rect()
+            try:
+                self.sf.canvas.itemconfigure('dsplaceholder',
+                                             text=f'内嵌浏览器启动失败：{err}')
+            except Exception:
+                pass
+            self.toast(f'内嵌浏览器启动失败：{err}', 'err', 5000)
+            return
+        try:
+            self.sf.canvas.delete('dsplaceholder')
+        except Exception:
+            pass
+        self._ds_place()
+
+    def _ds_ensure_host(self):
+        """确保 Electron 宿主在跑（懒启动）。返回 '' 表示成功，否则返回错误说明。"""
+        if self.ds is not None and self.ds.running:
+            return ''
+        if getattr(self, '_ds_starting', False):
+            return ''
+        self._ds_starting = True
+        try:
+            from ds_bridge import host as ds_host
+        except ImportError as e:
+            self._ds_starting = False
+            return f'缺少 ds_bridge 模块（{e}）'
+        try:
+            self.ds = ds_host.DeepSeekHost(ROOT, log=self._ds_log,
+                                           profile=DS_PROFILE_DIR)
+            if not self.ds.start():
+                err = self.ds.start_error or '未知原因'
+                self.ds = None
+                return err
+        finally:
+            self._ds_starting = False
+        return ''
+
+    def _ds_place(self):
+        """把浏览器窗口摆到右侧区域；第一次还要 SetParent 嵌进来。"""
+        if not self.ds or not self.ds.running:
+            return
+        x, y, w, h = self._ds_rect()
+        if getattr(self.ds, '_embedded', False):
+            # 已经嵌过一次：只需挪位置（SetParent 一次就够，别每次重建都重挂）
+            self.ds.move(x, y, w, h)
+            if not self._ds_visible:
+                self.ds.show()
+                self._ds_visible = True
+            self._ds_apply_theme()
+            return
+        try:
+            parent = ctypes.windll.user32.GetParent(self.root.winfo_id()) or \
+                self.root.winfo_id()
+        except Exception:
+            parent = self.root.winfo_id()
+        if self.ds.embed(parent, x, y, w, h):
+            self.ds.show()
+            self._ds_visible = True
+            self._ds_apply_theme()
+
+    def _ds_leave(self):
+        """离开本页就把浏览器藏起来（它是独立 Win32 子窗口，不会随画布清掉）。"""
+        if self._ds_visible and self.ds is not None:
+            try:
+                self.ds.hide()
+            except Exception:
+                pass
+            self._ds_visible = False
+
+    # ── 清单 ──
+
+    def _ds_on_docs_only(self, value):
+        """只发文档：默认开。实测官网单条消息容易被大量图片挤爆（30 个以内才稳）。"""
+        self._ds_docs_only = bool(value)
+        self.settings['ds_docs_only'] = '1' if value else '0'
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self.list.set_items(self._ds_items())
+        self._ds_update_hint()
+        if value:
+            self.toast('已切到「只发文档」：图片不会再被勾选发送（可以自己拖给网页版）',
+                       'ok', 3600)
+
+    def _batch_label(self):
+        return f'每批 {self._ds_limit} 个 ⇄'
+
+    def _ds_cycle_batch(self):
+        """点一下换一个批量（10 → 20 → 30 → 10）。
+
+        为什么不用下拉框：下拉展开的浮层是画在 Tk 画布上的，而内嵌浏览器是独立
+        Win32 子窗口、永远盖在画布之上 —— 浮层会被它挡住，等于选不了。
+        """
+        try:
+            i = self.DS_LIMIT_CHOICES.index(self._ds_limit)
+        except ValueError:
+            i = len(self.DS_LIMIT_CHOICES) - 1
+        self._ds_limit = self.DS_LIMIT_CHOICES[(i + 1) % len(self.DS_LIMIT_CHOICES)]
+        self.settings['ds_batch'] = str(self._ds_limit)
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        try:
+            self._batch_btn.set_text(self._batch_label())
+        except Exception:
+            pass
+        self._ds_update_hint()
+
+    def _ds_on_batch(self, label):
+        """兼容旧接口：万一还有地方按标签设置。"""
+        try:
+            self._ds_limit = int(str(label))
+        except ValueError:
+            self._ds_limit = self.DS_LIMIT
+        self.settings['ds_batch'] = str(self._ds_limit)
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._ds_update_hint()
+
+    def _ds_effective_units(self):
+        """真正要发的勾选项（应用「只发文档」过滤）。"""
+        units = self._ds_selected_units()
+        if self._ds_docs_only:
+            units = [u for u in units if u.get('kind') != 'image']
+        return units
+
+    def _ds_pick_root(self):
+        from tkinter import filedialog
+        init = self.ds_out_root if os.path.isdir(self.ds_out_root or '') else \
+            os.path.join(os.environ.get('USERPROFILE', 'C:'), 'Desktop')
+        d = filedialog.askdirectory(initialdir=init, title='选择要发送的导出文件夹')
+        if not d:
+            return
+        self.ds_out_root = d
+        self.settings['ds_root'] = d
+        try:
+            save_settings(self.settings)
+        except Exception:
+            pass
+        self._ds_scan()
+
+    def _ds_scan(self):
+        from ds_bridge import plan as ds_plan
+        self.ds_units = ds_plan.scan_export_dir(self.ds_out_root or '')
+        self.ds_selected = {u['id'] for u in self.ds_units}     # 默认全选
+        if not self.ds_units:
+            self.toast('这个文件夹里没有可发送的内容（找 .md/.txt/.html 和 *_图片 目录）',
+                       'warn', 4000)
+        self.list.set_items(self._ds_items())
+        self._ds_update_hint()
+
+    def _ds_items(self):
+        items = []
+        for u in self.ds_units:
+            skipped = self._ds_docs_only and u['kind'] == 'image'
+            items.append({'wxid': u['id'], 'title': u['label'][:34],
+                          'preview': (u['detail'] + '（已跳过：只发文档）') if skipped
+                          else u['detail'],
+                          'time': '图片' if u['kind'] == 'image' else '文档',
+                          'group': u['kind'] == 'image', 'tags': [],
+                          'sel': (u['id'] in self.ds_selected) and not skipped})
+        return items
+
+    def _ds_on_toggle(self, item):
+        if item.get('sel'):
+            self.ds_selected.add(item['wxid'])
+        else:
+            self.ds_selected.discard(item['wxid'])
+        self._ds_update_hint()
+
+    def _ds_sel_all(self, value):
+        self.list.set_all(value)
+        self.ds_selected = {it['wxid'] for it in self.list.items if it.get('sel')}
+        self._ds_update_hint()
+
+    def _ds_selected_units(self):
+        return [u for u in self.ds_units if u['id'] in self.ds_selected]
+
+    def _ds_update_hint(self):
+        from ds_bridge import plan as ds_plan
+        units = self._ds_effective_units()
+        s = ds_plan.summarize(units, self._ds_limit)
+        root = self.ds_out_root or '未选择（点左上「选择导出文件夹」）'
+        mode = '只发文档' if self._ds_docs_only else '文档+图片'
+        txt = (f'{mode} · 每批 {self._ds_limit} 个 ｜ '
+               f'已选 {len(units)} 项 · {s["files"]} 个文件'
+               f'（文档 {s["docs"]}' + (f' + 图片 {s["images"]}' if not self._ds_docs_only else '')
+               + f'）｜ 分 {s["batches"]} 批')
+        try:
+            self.sf.canvas.itemconfigure('dshint', text=txt)
+            self.sf.canvas.itemconfigure(
+                'dspath', text='导出目录：' + self._fit_text(root, self.DS_LEFT_W - 10, 8))
+        except Exception:
+            pass
+
+    # ── 诊断 ──
+
+    def _ds_diag(self):
+        """页面结构诊断：选择器失效时用它导出候选元素，方便回来改。"""
+        if self._ds_ensure_host():
+            self.toast('内嵌浏览器还没起来', 'err')
+            return
+        r = self.ds.diag()
+        if r.get('ok') and r.get('file'):
+            try:
+                os.startfile(r['file'])
+                self.toast('已打开诊断文件', 'ok')
+            except Exception:
+                self.toast(f'诊断已写出：{r["file"]}', 'ok', 4000)
+        else:
+            self.toast(f'诊断失败：{r.get("error")}', 'err')
+
+    # ── 发送 ──
+
+    def _ds_preflight(self):
+        """发送前的体检：页面在不在、登录了没、找得到上传入口吗。
+
+        为什么要这一步：没登录时页面上**根本没有** input[type=file]，
+        直接开跑只会得到一堆"挂附件失败"，甚至还可能让启发式去点到登录表单
+        的按钮。所以这里先挡住，并明确告诉用户要做什么。
+        返回 '' 表示可以发，否则返回给用户看的错误说明。
+        """
+        if not self.ds or not self.ds.running:
+            return '内嵌浏览器没在运行，请先点「DeepSeek 官网」页签'
+        st = self.ds.state()
+        if not st.get('ok'):
+            return f'读不到内嵌页面状态：{st.get("error") or st}'
+        # 就绪判定要**两条路都认**：主进程侧的 S.pageReady 有可能和真实状态脱节
+        # （历史上它被 did-start-loading 打回 false 后卡住，页面明明好了却报
+        #  "还在加载，不能发送"）。页面自己报的 document.readyState 是更可靠的判据。
+        ready_flag = bool(st.get('ready'))
+        rs = str(st.get('readyState') or '').lower()
+        if not ready_flag and rs != 'complete':
+            return f'内嵌页面还在加载（页面状态 {rs or "未知"}），等它显示出来再试'
+        if st.get('loggedIn') is False:
+            return '还没登录 DeepSeek：请先在右侧页面里用手机号/密码登录，再点发送'
+        if not st.get('fileInput'):
+            return ('页面上找不到上传入口（input[type=file]）—— '
+                    '可能是没登录、或官网改版了。可以点「诊断」把页面结构导出来反馈')
+        return ''
+
+    def _ds_refresh_prompt_file(self):
+        """发送前把导出目录里的「给AI的指令.txt」刷新成**当前**模板。
+
+        为什么必须做：导出目录里的那个文件是**导出当时**写进去的。用户后来改了
+        `AI提示词.txt`（例如加了「分批接收协议」），旧导出目录里还是老文案 ——
+        从那儿发送，喂给 AI 的就是过时指令（用户实测踩到过这个坑）。
+        每次发送前重写一遍，保证协议永远是最新的。
+        """
+        root = self.ds_out_root or ''
+        if not root or not os.path.isdir(root):
+            return ''
+        path = os.path.join(root, '给AI的指令.txt')
+        try:
+            import ai_prompt
+            ai_prompt.clear_cache()                 # 用户刚改过模板也要立即生效
+            text = (ai_prompt.load_prompt(BASE) or '').strip()
+        except Exception:  # noqa: BLE001
+            return ''
+        if not text:
+            return ''
+        try:
+            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(text + '\n')
+            return path
+        except OSError:
+            return ''
+
+    def _ds_send(self, dry_run=False):
+        from tkinter import messagebox
+        from ds_bridge import plan as ds_plan
+        if getattr(self, '_ds_sending', False):
+            self.toast('正在发送中', 'warn')
+            return
+        units = self._ds_effective_units()
+        if not units:
+            self.toast('请先在左边勾选要发送的内容'
+                       + ('（当前是「只发文档」模式，图片被跳过）'
+                          if self._ds_docs_only else ''), 'warn', 4000)
+            return
+        paths = ds_plan.expand_units(units)
+        miss = ds_plan.missing_files(paths)
+        if miss:
+            self.toast(f'有 {len(miss)} 个文件已经不在磁盘上，请重新选择目录', 'err', 4000)
+            return
+        # 把旧导出目录里的指令文件刷新成最新版（否则喂给 AI 的是过时协议）
+        refreshed = self._ds_refresh_prompt_file()
+        if refreshed:
+            self._ds_log('已把「给AI的指令.txt」刷新为最新指令')
+        over = ds_plan.find_oversize(paths)
+        if over and not messagebox.askokcancel(
+                '有文件超过 100MB',
+                f'{len(over)} 个文件超过网页版单文件上限（100MB），发送可能失败：\n'
+                + '\n'.join('  · ' + os.path.basename(p) for p, _ in over[:5]) +
+                '\n\n仍然继续？'):
+            return
+        batches = ds_plan.plan_batches(paths, self._ds_limit)
+        if not batches:
+            self.toast('没有要发送的文件', 'warn')
+            return
+        if not dry_run:
+            if self._ds_ensure_host():
+                self.toast('内嵌浏览器没起来，无法发送', 'err')
+                return
+            problem = self._ds_preflight()
+            if problem:
+                self._ds_log('不能发送：' + problem)     # 也留一行在左下角（提示可能被浏览器挡）
+                self.toast(problem, 'warn', 6000)
+                return
+            head = '、'.join(os.path.basename(b[0]) for b in batches[:3])
+            if not messagebox.askokcancel(
+                    '确认发送',
+                    f'将向当前对话发送 {len(paths)} 个文件，分 {len(batches)} 批'
+                    f'（每批 ≤{self._ds_limit}）：\n\n'
+                    f'批次大小：{"+".join(str(len(b)) for b in batches)}\n'
+                    f'从 {head} … 开始\n\n'
+                    '每批发出后会等它自然答完（协议下每批只回一句「我已接收上述信息」），'
+                    '只有超过 25 秒还没答完才截断。\n'
+                    '最后一批会自动附带一句「我已发送完毕」，触发它开始正式分析。\n'
+                    '发送期间请不要切换页面。\n\n确定开始？'):
+                return
+        self._ds_open_progress(len(paths), batches, dry_run)
+
+    def _ds_open_progress(self, n_files, batches, dry_run):
+        th = self.theme
+        win = tk.Toplevel(self.root)
+        win.title('演练分批' if dry_run else '正在发送到 DeepSeek 网页版…')
+        win.geometry('620x400')
+        win.configure(bg=T.rgb2hex(th['bg_top']))
+        win.transient(self.root)
+        if self._ico:
+            try:
+                win.iconbitmap(self._ico)
+            except Exception:
+                pass
+        bg = T.rgb2hex(th['bg_top'])
+        tk.Label(win, text=(f'{"演练" if dry_run else "发送"} {n_files} 个文件 · '
+                            f'{len(batches)} 批（每批 ≤{self._ds_limit}）'),
+                 bg=bg, fg=T.rgb2hex(th['text']),
+                 font=(self.sf.font, 13, 'bold')).pack(anchor='w', padx=18, pady=(14, 2))
+        cur = tk.Label(win, text='准备中…', bg=bg, fg=T.rgb2hex(th['accent']),
+                       font=(self.sf.font, 10, 'bold'), wraplength=580,
+                       justify='left')
+        cur.pack(anchor='w', padx=18, fill='x')
+        # 剩余时间单独一行，由界面每秒自己刷新 —— 只靠批次边界上报的那一次，
+        # 用户盯着看会觉得"数字不动/不准"（尤其每批要等十几秒文件处理）。
+        eta_lbl = tk.Label(win, text='', bg=bg, fg=T.rgb2hex(th['text_dim']),
+                           font=(self.sf.font, 9), wraplength=580, justify='left')
+        eta_lbl.pack(anchor='w', padx=18, fill='x')
+        bar = tk.Canvas(win, height=12, bg=bg, highlightthickness=0)
+        bar.pack(fill='x', padx=18, pady=(8, 4))
+
+        def draw_bar(done, total):
+            bar.delete('all')
+            w = max(1, bar.winfo_width() - 4)
+            bar.create_rectangle(2, 3, 2 + w, 9, fill=T.rgb2hex(th['surface2']),
+                                 outline='')
+            if total:
+                bar.create_rectangle(2, 3, 2 + w * done / total, 9,
+                                     fill=T.rgb2hex(th['accent']), outline='')
+
+        log = tk.Text(win, height=13, bg=T.rgb2hex(th['surface']),
+                      fg=T.rgb2hex(th['text_dim']), bd=0,
+                      font=(self.sf.font, 9))
+        log.pack(fill='both', expand=True, padx=18, pady=(6, 8))
+        log.configure(state='disabled')
+        self._ds_cancel_flag = False
+
+        def close_win():
+            """关窗：发送中先问一句，然后置取消标记并关掉。
+
+            上一版的毛病：只置了取消标记、窗口却不关 —— 而且是**静默**的，
+            用户点 X 以为关掉了，其实发送在后台被取消；演练跑完窗口也关不掉。
+            """
+            if getattr(self, '_ds_sending', False):
+                from tkinter import messagebox
+                if not messagebox.askokcancel(
+                        '还在发送', '发送还没结束。\n\n确定要停下并关闭这个窗口吗？'):
+                    return
+                self._ds_cancel_flag = True
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        btn = tk.Button(win, text='取消', font=(self.sf.font, 10), relief='flat',
+                        cursor='hand2',
+                        command=lambda: (setattr(self, '_ds_cancel_flag', True),
+                                         btn.configure(state='disabled'),
+                                         cur.configure(text='正在停下了…')))
+        btn.pack(anchor='e', padx=18, pady=(0, 14))
+        win.protocol('WM_DELETE_WINDOW', close_win)
+
+        ctx = {'win': win, 'cur': cur, 'log': log, 'bar': bar, 'bar_draw': draw_bar}
+        self._ds_sending = True
+        self._ds_done_batches = 0
+        self.btn_ds_send.set_state('disabled')
+
+        # ⚠️ 工作线程**绝对不要碰 Tk**。
+        # 以前这里直接 `self.root.after(0, ...)`：那不是线程安全的（主线程不在
+        # mainloop 里时会抛 "main thread is not in main loop"），更糟的是线程里
+        # 一抛异常就没人调 finish()，界面会**永远卡在"正在发送中"**、连切页都被
+        # 挡住。现在改成：线程只往队列里丢消息，主线程用 after 轮询消费。
+        import queue
+        q = queue.Queue()
+        # 剩余时间由界面自己每秒算：只靠批次边界上报一次，等十几秒文件处理的时候
+        # 数字一直不动，看起来就是"算错了"。
+        prog = {'done': 0, 'total': len(batches), 't0': time.time(), 'marks': []}
+
+        def ui_log(msg):
+            q.put(('log', str(msg)))
+
+        def ui_progress(done, total, text):
+            q.put(('prog', (done, total, text)))
+
+        def ui_eta():
+            try:
+                done = min(prog['done'], prog['total'])
+                total = prog['total']
+                marks = prog['marks']
+                if done <= 0:
+                    txt = f'共 {total} 批 · 正在准备第 1 批（每批要先给文件留处理时间）'
+                else:
+                    if len(marks) >= 2:
+                        avg = (marks[-1] - marks[0]) / (len(marks) - 1)
+                    elif marks:
+                        avg = max(1.0, time.time() - marks[0])
+                    else:
+                        avg = 20.0
+                    remain = avg * max(0, total - done)
+                    txt = (f'已完成 {done}/{total} 批 · 预计还需 {_fmt_dur(remain)}'
+                           f' · 每批约 {_fmt_dur(avg)}')
+                eta_lbl.configure(text=txt)
+            except Exception:
+                pass
+            if getattr(self, '_ds_sending', False):
+                try:
+                    win.after(1000, ui_eta)
+                except Exception:
+                    pass
+
+        def drain():
+            """主线程侧：把队列里的消息搬到界面上。返回是否收到结束信号。"""
+            for _ in range(200):
+                try:
+                    kind, payload = q.get_nowait()
+                except queue.Empty:
+                    return False
+                if kind == 'log':
+                    try:
+                        log.configure(state='normal')
+                        log.insert('end', payload + '\n')
+                        log.see('end')
+                        log.configure(state='disabled')
+                        self._ds_log(payload)
+                    except Exception:
+                        pass
+                elif kind == 'prog':
+                    done, total, text = payload
+                    self._ds_done_batches = done
+                    if done > prog['done']:
+                        prog['done'] = done
+                        prog['marks'].append(time.time())
+                    try:
+                        cur.configure(text=text)
+                        draw_bar(done, total)
+                    except Exception:
+                        pass
+                elif kind == 'done':
+                    finish(payload)
+                    return True
+            return False
+
+        def poll():
+            if drain():
+                return
+            try:
+                win.after(80, poll)
+            except Exception:
+                pass
+
+        def worker():
+            from ds_bridge import sender as ds_sender
+            try:
+                s = ds_sender.BatchSender(self.ds, limit=self._ds_limit,
+                                          dry_run=dry_run, log=ui_log)
+                res = s.run(batches, on_progress=ui_progress,
+                            should_cancel=lambda: self._ds_cancel_flag)
+            except Exception as e:      # noqa: BLE001
+                import traceback
+                q.put(('log', f'发送线程崩了：{e}'))
+                q.put(('log', traceback.format_exc().splitlines()[-1]))
+                res = {'ok': False, 'batches': len(batches), 'sent_batches': 0,
+                       'sent_files': 0, 'failed': [], 'stopped': 0,
+                       'cancelled': False, 'error': f'内部错误：{e}'}
+            q.put(('done', res))
+
+        def finish(res):
+            self._ds_sending = False
+            try:
+                self.btn_ds_send.set_state('normal')
+            except Exception:
+                pass
+            summary = (f'完成 {res["sent_batches"]}/{res["batches"]} 批 · '
+                       f'{res["sent_files"]} 个文件 · 截断 {res["stopped"]} 次'
+                       f'{"（已取消）" if res["cancelled"] else ""}')
+            if res.get('error'):
+                summary += f'；错误：{res["error"]}'
+            if res['failed']:
+                summary += f'；失败 {len(res["failed"])} 批'
+                hint = ('附件可能已经挂在内嵌页面上了：请切到官网页签，'
+                        '手动点发送或把附件删掉，再重新「开始发送」。')
+                if any(k in (res.get('error') or '')
+                       for k in ('异常文件', '服务器繁忙', '请检查网络', '发送失败')):
+                    hint = ('官网拒收（多半是一批文件太多）：把左下角「每批 30 个」'
+                            '点一下改成更小的值，并把官网页面上残留的附件删掉，'
+                            '再重新「开始发送」。')
+                summary += '\n' + hint
+            try:
+                cur.configure(text=summary)
+            except Exception:
+                pass
+            try:
+                log.configure(state='normal')
+                log.insert('end', summary + '\n')
+                log.see('end')
+                log.configure(state='disabled')
+            except Exception:
+                pass
+            self._ds_log(summary)
+            self.toast(summary, 'ok' if res['ok'] else 'warn', 5000)
+            try:
+                win.title('发送结束')
+                # 结束后按钮变成「关闭」——演练跑完必须能关掉窗口
+                btn.configure(text='关闭', state='normal', command=close_win)
+            except Exception:
+                pass
+
+        draw_bar(0, len(batches))
+        win.update_idletasks()          # 先布局一次，进度条初始宽度才是对的
+        draw_bar(0, len(batches))
+        bar.bind('<Configure>',
+                 lambda e: draw_bar(getattr(self, '_ds_done_batches', 0),
+                                    len(batches)))
+        win.after(80, poll)             # 主线程轮询（after 只在主线程调用）
+        win.after(300, ui_eta)          # 剩余时间每秒刷新
+        threading.Thread(target=worker, daemon=True, name='ds-send').start()
+
     # ────────────────────── 退出 ──────────────────────
 
     def quit_app(self):
@@ -1160,21 +2357,33 @@ class App:
         self._closing = True
         wcdb = self.wcdb
         self.wcdb = None
+        ds = self.ds
+        self.ds = None
         try:
             self.root.destroy()
         except Exception:
             pass
-        if wcdb is not None:
-            import threading
 
-            def _cleanup():
+        def _cleanup():
+            # 内嵌浏览器：/quit → terminate → taskkill，全程在后台，不挡关窗
+            if ds is not None:
+                try:
+                    ds.detach()
+                except Exception:
+                    pass
+                try:
+                    ds.shutdown(wait=True)
+                except Exception:
+                    pass
+            if wcdb is not None:
                 try:
                     wcdb.stop()
                 except Exception:
                     pass
 
-            t = threading.Thread(target=_cleanup, daemon=True,
-                                 name='wcdb-shutdown')
+        if wcdb is not None or ds is not None:
+            import threading
+            t = threading.Thread(target=_cleanup, daemon=True, name='shutdown')
             t.start()
 
     def run(self):

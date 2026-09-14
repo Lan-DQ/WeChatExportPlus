@@ -208,6 +208,20 @@ def hex2rgb(s):
 
 
 def rgb2hex(c):
+    """RGB 元组 → '#rrggbb'。
+
+    ⚠️ 主题里的颜色**两种形态都有**：`bg_top`/`bg_bottom` 是元组，
+    而 `surface`/`text`/`accent`/`text_dim` 等本来就是 '#rrggbb' 字符串。
+    所以这里对字符串直接放行 —— 否则 `rgb2hex(theme['text'])` 会抛
+    `ValueError: invalid literal for int() with base 10: '#'`。
+    这个坑真实发生过：标签弹窗在创建到一半时抛错，异常被输入分发层吞掉，
+    用户只看到一个空白、点不动的窗口。
+    """
+    if isinstance(c, str):
+        s = c.strip()
+        if s.startswith('#'):
+            return s
+        return '#' + s
     return '#%02x%02x%02x' % (int(c[0]), int(c[1]), int(c[2]))
 
 

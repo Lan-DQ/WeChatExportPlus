@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DeepSeek Mock</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #f7f8fa; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+  #head { padding: 14px 20px; font-size: 15px; font-weight: 600; color: #222; border-bottom: 1px solid #e6e8ec; background: #fff; }
+  #head .hint { font-weight: 400; font-size: 12px; color: #8a9099; margin-left: 10px; }
+  #log { flex: 1; overflow: auto; padding: 16px 20px; font-size: 13px; color: #444; line-height: 1.7; }
+  #log .line { padding: 4px 0; border-bottom: 1px dashed #eceef2; }
+  #log .line b { color: #1b6ef3; }
+  #composerWrap { padding: 12px 16px 16px; background: #fff; border-top: 1px solid #e6e8ec; }
+  #composer {
+    border: 1px solid #dcdfe6; border-radius: 14px; padding: 10px 12px 6px;
+    background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.04);
+  }
+  #attachments { display: flex; flex-wrap: wrap; gap: 8px; }
+  #attachments:not(:empty) { margin-bottom: 8px; }
+  .file-item {
+    display: flex; align-items: center; gap: 6px; max-width: 240px;
+    border: 1px solid #e3e6eb; background: #f6f7f9; border-radius: 8px;
+    padding: 5px 8px; font-size: 12px; color: #333;
+  }
+  .file-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-item .rm { color: #9aa0a6; cursor: pointer; font-size: 13px; line-height: 1; }
+  #editor {
+    min-height: 48px; max-height: 160px; overflow: auto; outline: none;
+    font-size: 14px; line-height: 1.6; color: #222; padding: 4px 2px; white-space: pre-wrap;
+  }
+  #editor:empty:before { content: attr(data-placeholder); color: #b3b8c0; }
+  #tools { display: flex; align-items: center; gap: 10px; padding-top: 6px; }
+  #tools .grow { flex: 1; }
+  .iconbtn {
+    border: 0; background: transparent; padding: 6px; border-radius: 50%;
+    cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .iconbtn:hover { background: #f0f2f5; }
+  .iconbtn svg { display: block; }
+  #stopBtn { background: #1b6ef3; }
+  #stopBtn:hover { background: #1560d8; }
+  #hint { padding: 8px 20px; font-size: 12px; color: #8a9099; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="head">DeepSeek（本地 mock）<span class="hint">此页面故意不给按钮加 id / aria-label，用来验证宿主的启发式</span></div>
+  <div id="log"><div class="line">等待消息……</div></div>
+  <div id="composerWrap">
+    <div id="composer">
+      <div id="attachments"></div>
+      <div id="editor" contenteditable="true" data-placeholder="给 DeepSeek 发送消息"></div>
+      <div id="tools">
+        <!-- 附件按钮：回形针 svg，无 aria-label / id -->
+        <button class="iconbtn" type="button" tabindex="-1">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4a5058" stroke-width="1.8">
+            <path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 014.95 4.95l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.49"/>
+          </svg>
+        </button>
+        <span class="grow"></span>
+        <!-- 发送按钮：纸飞机 path，无 aria-label / id。生成中会被隐藏。 -->
+        <button class="iconbtn" type="button" tabindex="-1">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#1b6ef3" stroke-width="1.8">
+            <path d="M22 2L11 13"/>
+            <path d="M22 2l-7 20-4-9-9-4 20-7z"/>
+          </svg>
+        </button>
+        <!-- 停止按钮：方块 <rect>，无 aria-label / id，初始隐藏 -->
+        <button class="iconbtn" type="button" tabindex="-1" id="stopBtn" style="display:none">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="#ffffff">
+            <rect x="6" y="6" width="12" height="12" rx="2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div id="hint">mock：点发送后会把本条消息的文件名列表 POST 到 /log；超过 50 个文件会额外上报 over-limit</div>
+  </div>
+</div>
+<input type="file" multiple style="display:none" accept=".txt,.md,.pdf,.docx,.png,.jpg">
+<script>
+(function () {
+  'use strict';
+  var fileInput = document.querySelector('input[type=file]');
+  var editor = document.getElementById('editor');
+  var attachments = document.getElementById('attachments');
+  var logEl = document.getElementById('log');
+  var tools = document.getElementById('tools');
+  var buttons = tools.querySelectorAll('button');
+  var attachBtn = buttons[0];
+  var sendBtn = buttons[1];
+  var stopBtn = document.getElementById('stopBtn');
+  var files = [];      // {name, size} 待发送附件
+  var streaming = false;
+
+  function line(html) {
+    var d = document.createElement('div');
+    d.className = 'line';
+    d.innerHTML = html;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function post(payload) {
+    try {
+      fetch('/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  function render() {
+    attachments.innerHTML = '';
+    files.forEach(function (f, i) {
+      var item = document.createElement('div');
+      item.className = 'file-item';
+      item.setAttribute('data-ds-attachment', '1');
+      var nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = f.name;
+      var rm = document.createElement('span');
+      rm.className = 'rm';
+      rm.textContent = '×';
+      rm.addEventListener('click', function () {
+        files.splice(i, 1);
+        render();
+      });
+      item.appendChild(nm);
+      item.appendChild(rm);
+      attachments.appendChild(item);
+    });
+  }
+  function setStreaming(on) {
+    streaming = !!on;
+    stopBtn.style.display = on ? 'inline-flex' : 'none';
+    sendBtn.style.display = on ? 'none' : 'inline-flex';
+    editor.setAttribute('contenteditable', on ? 'false' : 'true');
+  }
+
+  // 附件按钮：打开系统文件选择框（宿主用 CDP setFileInputFiles 直接驱动 input，不需要真对话框）
+  attachBtn.addEventListener('click', function () {
+    try { fileInput.click(); } catch (e) {}
+  });
+
+  fileInput.addEventListener('change', function () {
+    var added = 0;
+    for (var i = 0; i < fileInput.files.length; i++) {
+      var f = fileInput.files[i];
+      var dup = false;
+      for (var j = 0; j < files.length; j++) { if (files[j].name === f.name) { dup = true; break; } }
+      if (dup) continue;
+      files.push({ name: f.name, size: f.size });
+      added++;
+    }
+    render();
+    line('已挂附件 <b>' + added + '</b> 个，当前共 <b>' + files.length + '</b> 个');
+  });
+
+  function send() {
+    if (streaming) return;
+    var text = (editor.textContent || '').trim();
+    if (!text && files.length === 0) return;
+    var names = files.map(function (f) { return f.name; });
+    post({ event: 'message', index: 0, text: text, count: names.length, files: names });
+    if (names.length > 50) post({ event: 'over-limit', count: names.length });
+    line('已发送 1 条消息，附件 <b>' + names.length + '</b> 个：' + (names.slice(0, 4).join('、') || '（无）'));
+    files = [];
+    render();
+    editor.textContent = '';
+    setTimeout(function () { setStreaming(true); }, 300);
+  }
+  sendBtn.addEventListener('click', send);
+
+  stopBtn.addEventListener('click', function () {
+    if (!streaming) return;
+    setStreaming(false);
+    post({ event: 'stopped', at: Date.now() });
+    line('已停止生成');
+  });
+
+  // 有些站点用 Escape 中断生成；mock 也对齐这个行为，方便验证宿主的兜底逻辑
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && streaming) {
+      setStreaming(false);
+      post({ event: 'stopped', at: Date.now(), via: 'escape' });
+      line('已通过 Escape 停止生成');
+    }
+  });
+
+  window.__mock = {
+    files: function () { return files.slice(); },
+    streaming: function () { return streaming; },
+    setStreaming: setStreaming
+  };
+})();
+</script>
+</body>
+</html>

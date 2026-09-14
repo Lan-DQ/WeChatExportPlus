@@ -42,14 +42,23 @@ REQUIRED = [
     'scripts/node_modules/koffi',
     'scripts/node_modules/fzstd',
     'resources/native/weflow-image-native-win32-x64.node',
+    # v3.0：内嵌 DeepSeek 官网页（Electron 侧应用 + Python 桥接层）
+    'electron/electron.exe',
+    'dsview/main.js',
+    'dsview/package.json',
+    'ds_bridge/__init__.py',
+    'ds_bridge/host.py',
+    'ds_bridge/plan.py',
+    'ds_bridge/sender.py',
 ]
 
 HIDDEN_IMPORTS = [
     'wcdb_server', 'media_resolver', 'image_decoder', 'packed_info_parser',
     'logger', 'html_exporter', 'pdf_exporter', 'csv_exporter', 'excel_exporter',
     'message_content', 'batch_export', 'index_exporter', 'ai_exporter', 'md_exporter',
-    'ai_prompt', 'ui_theme', 'ui_widgets', 'PIL.ImageTk', 'PIL.ImageFilter',
-    'fpdf', 'fpdf.fonts', 'openpyxl', 'PIL', 'Crypto.Cipher.AES',
+    'ai_prompt', 'ui_theme', 'ui_widgets', 'session_tags', 'PIL.ImageTk',
+    'PIL.ImageFilter', 'fpdf', 'fpdf.fonts', 'openpyxl', 'PIL', 'Crypto.Cipher.AES',
+    'ds_bridge', 'ds_bridge.host', 'ds_bridge.plan', 'ds_bridge.sender',
 ]
 
 
@@ -157,6 +166,38 @@ def copy_exporters():
     log('  [OK] exporters/')
 
 
+def copy_ds():
+    """复制 v3.0 的内嵌 DeepSeek 官网页组件。
+
+      - `ds_bridge/`：Python 侧（宿主管理 + 分批计划 + 发送调度）
+      - `dsview/`   ：Electron 侧（页面宿主 + 上传/发送/截断控制 API）
+
+    `dsview/mock/` 与自检脚本是开发期用的假页面，不进发布包。
+    """
+    log('\n[4.5] 复制 DeepSeek 官网页组件...')
+    src = os.path.join(ROOT, 'ds_bridge')
+    dst = os.path.join(DIST, 'ds_bridge')
+    if not os.path.isdir(src):
+        raise SystemExit(f'缺少 ds_bridge 目录: {src}')
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    log('  [OK] ds_bridge/')
+
+    src = os.path.join(ROOT, 'dsview')
+    dst = os.path.join(DIST, 'dsview')
+    if not os.path.isdir(src):
+        raise SystemExit(f'缺少 dsview 目录: {src}')
+    if os.path.isdir(dst):
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc',
+                                                  'mock', 'verify_*.py',
+                                                  'node_modules'))
+    log('  [OK] dsview/（不含 mock/自检脚本）')
+
+
 def copy_icon():
     for name in ('icon.ico',):
         src = os.path.join(ROOT, 'gui', name)
@@ -197,6 +238,15 @@ def verify_dist():
         raise SystemExit('发布包不完整，缺少上面的文件。')
     log(f'  [OK] 必需文件齐全（{len(REQUIRED)} 项）')
 
+    # 发布包里绝不能带用户私人数据（交接文档里那条规矩，v3.0 又多了两项）
+    for junk, why in (('.ui_settings', '用户设置（含私人路径）'),
+                      ('会话标签.json', '用户自己打的会话标签'),
+                      ('ds_profile', '内嵌官网页的登录态（含 cookie）'),
+                      ('.boot.log', '启动期插桩日志')):
+        p = os.path.join(DIST, junk)
+        if os.path.exists(p):
+            log(f'  [危险] 发布包里残留 {junk} —— {why}，发版前必须删掉！')
+
     total = 0
     for dp, _dn, fns in os.walk(DIST):
         for f in fns:
@@ -212,7 +262,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--kernel', default='', help='原版 WeChatExport 目录（取运行时用）')
     ap.add_argument('--skip-build', action='store_true', help='跳过 PyInstaller，只组装目录')
+    ap.add_argument('--out', default='',
+                    help='输出目录（默认 dist\\WeChatExportPlus）。'
+                         '旧版本的程序还开着时 exe 会被锁住，用这个打到别处')
     args = ap.parse_args()
+
+    # 输出目录可以整体搬走：旧 exe 正在运行（用户还在测）时不能原地覆盖
+    global DIST
+    if args.out:
+        DIST = os.path.abspath(args.out)
+    BUILD = os.path.join(os.path.dirname(DIST), '_build_' + os.path.basename(DIST))
 
     kernel = find_kernel(args.kernel)
     log('=' * 60)
@@ -235,7 +294,8 @@ def main():
         except OSError as e:
             raise SystemExit(
                 f'无法删除旧 exe（可能程序还在运行）：{old_exe}\n{e}\n'
-                '请先关闭正在运行的 WeChatExportPlus 再重新构建。')
+                '请先关闭正在运行的 WeChatExportPlus 再重新构建，'
+                '或者用 --out 打到另一个目录。')
 
     if not args.skip_build:
         log('\n[1] PyInstaller 打包 GUI...')
@@ -265,6 +325,7 @@ def main():
     copy_runtime(kernel)
     copy_scripts()
     copy_exporters()
+    copy_ds()
     log('\n[5] 复制图标、提示词与启动器...')
     copy_icon()
     copy_ai_prompt()

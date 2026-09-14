@@ -486,7 +486,9 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
                 base = unique_base(root, base)
                 used_names.add(base)
 
-                # 图片先解密到临时目录（md_exporter 会按出现顺序改名成 01.jpg 02.jpg）
+                # 图片先解密到临时目录（md_exporter 会按出现顺序改名成
+                # 「<去重后的会话名>_0001.jpg」；前缀必须用 :486 unique_base 之后的
+                # base，否则同名会话的图片会互相覆盖、正文引用也会错配）
                 tmp = os.path.join(root, f'.md_tmp_{base}')
                 os.makedirs(tmp, exist_ok=True)
                 n_img = 0
@@ -495,7 +497,7 @@ def export_sessions(wcdb, data_dir, sessions, fmt, out_root,
                                                   img_holder=tmp)
                 out = md_exporter.export(
                     rows, root, {'wxid': wxid, 'title': base, 'is_group': is_group},
-                    image_map=md_exporter.build_image_map(rows),
+                    image_map=md_exporter.build_image_map(rows, base),
                     image_src_dir=os.path.join(tmp, '图片'),
                     # 故意不传 prompt：会话很多时，每个 .md 里都塞一份「给 AI 的指令」
                     # 纯属重复浪费（正文可能才几 KB，指令就占 1 KB）。
