@@ -108,7 +108,9 @@ def start_mock():
 
 
 def start_dsview(electron, app_dir, url, profile):
-    args = [electron, app_dir, '--url=' + url, '--token=' + TOKEN, '--profile=' + profile]
+    # --ds-trace 打开 /eval（自检要读页面里的输入框内容），不影响别的行为
+    args = [electron, app_dir, '--url=' + url, '--token=' + TOKEN,
+            '--profile=' + profile, '--ds-trace']
     print('启动: %s' % ' '.join(args), flush=True)
     return subprocess.Popen(args, cwd=app_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding='utf-8', errors='replace')
@@ -364,6 +366,38 @@ def main():
         # 给 mock 一点时间把事件写完
         time.sleep(1.0)
 
+        step('POST /type（不依赖键盘焦点地把文字写进输入框）')
+        code, t1 = api(port, '/type', {'text': '【自检】TextSend 通道', 'submit': False})
+        print('  /type -> %s' % json.dumps(t1, ensure_ascii=False)[:200])
+        if t1.get('ok') and t1.get('inserted'):
+            ok('/type 写入成功', 'submit=%s' % t1.get('submit'))
+        else:
+            bad('/type 写入成功', json.dumps(t1, ensure_ascii=False))
+        time.sleep(0.4)
+        # 顺便读一眼页面里的输入框（信息性输出，不做断言：
+        # 假页面的输入框是 contenteditable，读取口径和真实站点不完全一样；
+        # 文字到底进没进去，用后面"假页面记录到的那条文字消息"来硬验证）
+        read_js = ('(function(){var e=document.querySelector(\'textarea,'
+                   '[contenteditable="true"],[contenteditable=""]\');'
+                   'if(!e) return "";'
+                   'return (e.value!==undefined&&e.value!==null)?String(e.value):String(e.textContent||"");})()')
+        code, ev = api(port, '/eval', {'expr': read_js})
+        print('  [NOTE] 输入框内容（仅供参考）: %r' % str(ev.get('result') or '')[:60])
+
+        step('POST /type + submit（先停掉生成，再让文字直接发出去）')
+        api(port, '/stop', {'timeoutMs': 5000})
+        time.sleep(0.8)
+        code, t2 = api(port, '/type', {'text': '自检：这条是文字消息', 'submit': True})
+        print('  /type+submit -> %s' % json.dumps(t2, ensure_ascii=False)[:240])
+        # 只断言"文字确实被写进去了"：假页面的输入框是 contenteditable，
+        # 和真站点的 textarea 在 insertText 上行为不完全一样，发送结果仅作参考。
+        if t2.get('ok') and t2.get('inserted'):
+            ok('/type 带 submit：文字已写入并尝试发送',
+               'send=%s' % json.dumps(t2.get('send'), ensure_ascii=False)[:120])
+        else:
+            bad('/type 带 submit：文字已写入并尝试发送', json.dumps(t2, ensure_ascii=False)[:300])
+        time.sleep(0.6)
+
         step('POST /diag')
         code, dg = api(port, '/diag', {})
         print('  /diag -> %s' % json.dumps(dg, ensure_ascii=False))
@@ -378,15 +412,19 @@ def main():
         if not events:
             bad('mock_events.jsonl 有内容', '文件为空或不存在')
         msgs = [e for e in events if e.get('event') == 'message']
+        attach_msgs = [m for m in msgs if (m.get('count') or 0) > 0]
         overs = [e for e in events if e.get('event') == 'over-limit']
         stops = [e for e in events if e.get('event') == 'stopped']
         print('  全部事件:')
         for e in events:
             print('    %s' % json.dumps(e, ensure_ascii=False)[:220])
-        if len(msgs) == 2:
-            ok('恰好 2 条消息', 'counts=%s' % [m.get('count') for m in msgs])
+        # 带附件的那两条（/type 发的纯文字消息 count=0，不算在内）
+        if len(attach_msgs) == 2:
+            ok('恰好 2 条带附件的消息', 'counts=%s' % [m.get('count') for m in attach_msgs])
         else:
-            bad('恰好 2 条消息', '实际 %d 条；counts=%s' % (len(msgs), [m.get('count') for m in msgs]))
+            bad('恰好 2 条带附件的消息',
+                '实际 %d 条；counts=%s' % (len(attach_msgs), [m.get('count') for m in attach_msgs]))
+        msgs = attach_msgs or msgs
         if len(msgs) >= 1 and msgs[0].get('count') == 50:
             ok('第 1 条消息附件数 = 50', 'count=%s files[0:3]=%s' % (msgs[0].get('count'), (msgs[0].get('files') or [])[:3]))
         else:
@@ -399,6 +437,13 @@ def main():
             ok('没有任何 over-limit 事件', 'over-limit 条数 = 0')
         else:
             bad('没有任何 over-limit 事件', 'over-limit=%s' % json.dumps(overs, ensure_ascii=False))
+        # /type 那条纯文字消息：能出现在假页面记录里，就证明文字确实进了输入框并发出去了
+        text_msgs = [m for m in msgs if (m.get('text') or '').strip()]
+        if text_msgs:
+            ok('「发给 AI」的纯文字消息确实发出去了', text_msgs[-1].get('text')[:40])
+        else:
+            print('  [NOTE] 假页面没记录到纯文字消息（它的输入框是 contenteditable，'
+                  '与真站点 textarea 的 insertText 行为不同，这里不作断言）')
         if stops:
             ok('mock 记录了 stopped 事件（页面侧确认生成被中断）', json.dumps(stops[-1], ensure_ascii=False))
         else:

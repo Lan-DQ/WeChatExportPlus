@@ -947,6 +947,39 @@ def test_ds_preflight_accepts_page_ready_by_ready_state(tagged):
     a.ds = None
 
 
+def test_ds_ask_sends_text_through_host(tagged, tmp_path):
+    """「发给 AI」那条通道必须真的把文字交给宿主（走 insertText，不依赖键盘焦点）。
+
+    为什么要这条通道：内嵌页是跨进程子窗口，切页/切回窗口时可能收不到真实按键
+    （用户反馈"打不了字"）。这条走 Electron 的 insertText，一定可用。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    _ds_ready_app(a, tmp_path)
+
+    class FakeDS:
+        running = True
+        _embedded = True
+
+        def __init__(self):
+            self.calls = []
+
+        def type_text(self, text, submit=False):
+            self.calls.append((text, submit))
+            return {'ok': True, 'send': {'ok': True, 'how': 'button'}}
+
+    a.ds = FakeDS()
+    a._ask_entry.set('我已发送完毕')
+    a._ds_ask()
+    a.root.update()
+    assert a.ds.calls == [('我已发送完毕', True)], a.ds.calls
+    assert a._ask_entry.get() == '', '发完应该清空输入框'
+
+    # 空内容不该发
+    a._ds_ask()
+    a.root.update()
+    assert len(a.ds.calls) == 1
+
+
 def test_ds_send_refreshes_stale_prompt_file(tagged, tmp_path):
     """发送前必须把导出目录里的「给AI的指令.txt」刷新成最新模板。
 

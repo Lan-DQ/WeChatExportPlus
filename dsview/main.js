@@ -473,9 +473,10 @@ async function doSend(method, text) {
   // 发送是否真的发生：优先「输入框被清空」，其次「刚挂的附件已从页面消失」
   // （生成开始后站点常把输入框设成只读，此时输入框读不出内容，只能靠附件消失判断）
   //
-  // ⚠️ 等待窗口必须够长：挂了 50 个文件时，附件上传要十几秒，"输入框被清空/
-  // 附件消失"要等上传完才发生。窗口给 2.5 秒的话会被误判成"没点动"，然后退化到
-  // 回车 —— 而回车会把还没传完的消息直接发出去，站点就报"请检查网络后重试"。
+  // ⚠️ 还有第三种情况：**纯文字消息**（比如用户自己发「我已发送完毕」）。它没有附件，
+  // 发出去后输入框立刻变只读，前两条证据都拿不到 —— 以前会误报"没发出去"。
+  // 所以再加一条：发送前没在生成、发送后开始生成了，就是成功提交。
+  const streamingBefore = !!(await evalJs(R.exprStreaming()));
   const sendConfirmed = async (budgetMs) => {
     const until = Date.now() + (budgetMs || 2500);
     let cleared = null;
@@ -498,6 +499,15 @@ async function doSend(method, text) {
       if (att && att.cleared) {
         await evalJs(R.exprClearAttached());
         return { confirmed: true, via: 'attachments-cleared', cleared, attachments: att };
+      }
+      // 纯文字消息：没有附件可"消失"，输入框又因为生成中变只读 ——
+      // 只要"发之前没生成、现在开始生成了"，就说明消息提交成功。
+      if (!streamingBefore) {
+        const nowStreaming = !!(await evalJs(R.exprStreaming()));
+        if (nowStreaming) {
+          await evalJs(R.exprClearAttached());
+          return { confirmed: true, via: 'streaming-started', cleared, attachments: att };
+        }
       }
       if (Date.now() >= until) break;
     }
@@ -787,6 +797,39 @@ function startServer() {
           S.helperReady = false;
           wc.loadURL(target).catch((e) => trace('navigate 失败', String((e && e.message) || e)));
           return sendJson(res, 200, { ok: true });
+        }
+
+        // 往输入框里写字（可顺便回车发送）。
+        // 这是**不依赖操作系统焦点**的通道：CDP/Electron 直接把文本交给渲染层，
+        // 所以即使跨进程子窗口的键盘输入出了问题，用户也能把话发给 AI。
+        if (route === '/type') {
+          const body = await readBody(req);
+          const text = String(body.text || '');
+          const submit = !!body.submit;
+          await ensureHelper();
+          const focused = await evalJs(R.exprFocusComposer());
+          if (!focused || !focused.ok) {
+            return sendJson(res, 200, { ok: false, error: (focused && focused.reason) || '输入框聚焦失败' });
+          }
+          await sleep(120);
+          let inserted = false;
+          try { S.win.webContents.insertText(text); inserted = true; } catch (e) {}
+          if (!inserted) return sendJson(res, 200, { ok: false, error: '插入文本失败' });
+          await sleep(200);
+          let sent = null;
+          if (submit) sent = await doSend('auto');
+          return sendJson(res, 200, { ok: true, inserted: true, submit: submit, send: sent });
+        }
+
+        // 键盘焦点给回页面。切走再切回来时 WebContents 会丢掉自己的焦点，
+        // 表现就是"点进输入框打字没反应"。
+        if (route === '/focus') {
+          if (!S.win || S.win.isDestroyed()) return sendJson(res, 200, { ok: false, error: '窗口已销毁' });
+          let focused = false;
+          try { S.win.focus(); } catch (e) {}
+          try { S.win.webContents.focus(); focused = S.win.webContents.isFocused(); } catch (e) {}
+          try { S.win.showInactive(); } catch (e) {}
+          return sendJson(res, 200, { ok: true, focused: focused });
         }
 
         // 嵌入式流程的一环：Python 先 SetParent 到自己的窗口，再调 /show 让 Electron 自己显示

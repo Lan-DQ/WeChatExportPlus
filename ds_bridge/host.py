@@ -43,6 +43,7 @@ CHROME_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 
 # ── Win32 ──
 _u32 = ctypes.windll.user32
+_k32 = ctypes.windll.kernel32
 GWL_STYLE = -16
 WS_CHILD = 0x40000000
 WS_POPUP = 0x80000000
@@ -82,6 +83,8 @@ class DeepSeekHost:
         # 也绝不能和 WCDB 服务用的默认 profile 混用（Chromium 单例锁会打架）。
         self.profile = profile or os.path.join(base, 'ds_profile')
         self._embedded = False
+        # 是否已把宿主线程的输入队列和浏览器线程接起来（跨进程子窗口收键盘的前提）
+        self._input_attached = 0
         self._reader = None
         self.start_error = ''
 
@@ -299,10 +302,54 @@ class DeepSeekHost:
         return self._post('/diag', {}, 15)
 
     def show(self):
-        return self._post('/show', {}, 10)
+        r = self._post('/show', {}, 10)
+        # 显示之后必须把键盘焦点真正交给页面，否则"切走再切回来打不了字"
+        self.focus()
+        return r
 
     def hide(self):
         return self._post('/hide', {}, 10)
+
+    def _attach_input(self):
+        """把宿主线程和浏览器窗口所在线程的输入队列接起来。
+
+        为什么必须这样：Electron 的窗口被 `SetParent` 挂成了宿主窗口的子窗口，但它属于
+        **另一个线程/进程**。Windows 只把键盘消息派发给"前台窗口所在输入队列"里的焦点
+        窗口 —— 跨进程子窗口不在那条队列上，所以点进去 `document.hasFocus()` 都是 true、
+        打字却毫无反应（用户报的就是这个）。接上队列之后 `SetFocus` 才真正生效。
+        连上就**保持连接**，不要去 detach（detach 会让焦点状态回退）。
+        """
+        if self._input_attached or not self.hwnd:
+            return bool(self._input_attached)
+        try:
+            child = ctypes.c_void_p(self.hwnd)
+            pid = ctypes.wintypes.DWORD()
+            t_child = _u32.GetWindowThreadProcessId(child, ctypes.byref(pid))
+            t_me = _k32.GetCurrentThreadId()
+            if t_child and t_child != t_me:
+                if _u32.AttachThreadInput(t_me, t_child, True):
+                    self._input_attached = t_child
+                    return True
+        except (OSError, ValueError, AttributeError) as e:
+            self.log(f'接输入队列失败：{e}')
+        return False
+
+    def focus(self):
+        """把键盘焦点真正交给内嵌页面（切页/切回窗口时调用）。"""
+        if not (self.running and self.hwnd):
+            return False
+        try:
+            self._post('/focus', {}, 8)      # 让 Chromium 恢复 WebContents 焦点
+        except (OSError, ValueError):
+            pass
+        self._attach_input()
+        ok = False
+        try:
+            _u32.SetFocus(ctypes.c_void_p(self.hwnd))
+            ok = _u32.GetFocus() == self.hwnd
+        except (OSError, ValueError, AttributeError) as e:
+            self.log(f'聚焦失败：{e}')
+        return ok
 
     def attach(self, paths, timeout_ms=180000, settle_ms=None):
         """把文件挂到页面的上传框上。
@@ -334,6 +381,16 @@ class DeepSeekHost:
                           timeout=max(20, int(timeout_ms / 1000) + 15))
 
     # ── 真嵌入（Win32）──
+
+    def type_text(self, text, submit=False):
+        """把文字写进内嵌页面的输入框（可选直接发送）。
+
+        这是**不依赖操作系统键盘焦点**的通道：Electron 的 `insertText` 直接把文本交给
+        渲染层。跨进程子窗口偶尔收不到真实按键时，用户可以用它把话发给 AI
+        （比如最后那句「我已发送完毕」）。
+        """
+        return self._post('/type', {'text': str(text or ''), 'submit': bool(submit)},
+                          120 if submit else 20)
 
     def embed(self, parent_hwnd, x, y, w, h):
         """把浏览器窗口挂到主窗口上并摆到 (x,y,w,h)。返回是否成功。"""

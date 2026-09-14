@@ -67,7 +67,7 @@ TAGS_FILE = os.path.join(ROOT, session_tags.FILE_NAME)
 DS_PROFILE_DIR = os.path.join(ROOT, 'ds_profile')
 
 APP_TITLE = '微信聊天记录批量导出工具'
-APP_VERSION = 'v3.0.0'
+APP_VERSION = 'v3.0.1'
 
 FORMAT_CHOICES = [
     ('Markdown 单文件（推荐）', 'md'),
@@ -1736,6 +1736,22 @@ class App:
                                     '🚀 开始发送', kind='primary', font_size=11,
                                     radius=9, command=self._ds_send)
         self._widgets.append(self.btn_ds_send)
+        # 直接和 AI 说句话的通道。为什么不靠内嵌页自己的输入框：那是跨进程子窗口，
+        # 切页/切回窗口时可能收不到真实按键（用户反馈过）。这条走 Electron 的
+        # insertText，**不依赖操作系统键盘焦点**，永远能用。
+        ask_w = 300
+        ask_x = max(560, self.W - 38 - 170 - 16 - ask_w - 74)
+        self._ask_entry = W.Entry(self.sf, ask_x, top, ask_w, 34,
+                                  placeholder='发给 AI 的话（如：我已发送完毕）')
+        self._widgets.append(self._ask_entry)
+        try:
+            self._ask_entry.entry.bind('<Return>', lambda e: self._ds_ask())
+        except Exception:
+            pass
+        self.btn_ds_ask = W.Button(self.sf, ask_x + ask_w + 8, top, 66, 34,
+                                   '发送', kind='ghost', font_size=10, radius=9,
+                                   command=self._ds_ask, hover_dur=0.12)
+        self._widgets.append(self.btn_ds_ask)
 
         # 说明行（勾选统计）+ 右侧醒目警示，各占一行（挤在一行会互相压字）
         self.sf.text(38, 132, '', 9, th['text_dim'], tags='dshint')
@@ -1863,6 +1879,38 @@ class App:
             self._ds_visible = False
 
     # ── 清单 ──
+
+    def _ds_ask(self):
+        """把左侧输入框里的话发给内嵌页面的 AI（走 Electron insertText，不依赖键盘焦点）。"""
+        text = ''
+        try:
+            text = str(self._ask_entry.get() or '').strip()
+        except Exception:
+            text = ''
+        if not text:
+            self.toast('先在输入框里写点什么（例如「我已发送完毕」）', 'warn')
+            return
+        if self._ds_ensure_host():
+            self.toast('内嵌浏览器没起来，发不了', 'err')
+            return
+        try:
+            res = self.ds.type_text(text, submit=True)
+        except Exception as e:  # noqa: BLE001
+            self.toast(f'发送失败：{e}', 'err')
+            return
+        if not res or not res.get('ok'):
+            self.toast('发送失败：' + str((res or {}).get('error') or '未知原因'), 'err')
+            return
+        snd = (res.get('send') or {})
+        if snd.get('ok'):
+            self.toast('已发送给 AI', 'ok')
+            try:
+                self._ask_entry.set('')
+            except Exception:
+                pass
+        else:
+            self.toast('文字已填进官网页面的输入框，但发送没成功'
+                       '（' + str(snd.get('how') or '未知') + '）', 'warn', 4000)
 
     def _ds_on_docs_only(self, value):
         """只发文档：默认开。实测官网单条消息容易被大量图片挤爆（30 个以内才稳）。"""

@@ -1152,6 +1152,10 @@ function exprClickSend() {
 function exprSendReady() {
   return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.sendReadyInfo() : {ok:false,how:'none',reason:'helper 未注入'})`;
 }
+// 页面是否正在生成（用来确认"消息确实提交了"）
+function exprStreaming() {
+  return `(window.${HELPER_NAME} ? !!window.${HELPER_NAME}.getState().streaming : false)`;
+}
 function exprClickStop() {
   return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.clickStop() : {ok:false,how:'none',reason:'helper 未注入'})`;
 }
@@ -1184,6 +1188,7 @@ module.exports = {
   exprPickFileInput,
   exprClickSend,
   exprSendReady,
+  exprStreaming,
   exprClickStop,
   exprCountWithNames,
   exprSetAttached,
