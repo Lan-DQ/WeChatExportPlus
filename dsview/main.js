@@ -38,7 +38,8 @@ const SEND_SETTLE_PER_FILE_MS = 250;
 
 // ---------- 命令行参数 ----------
 function parseArgv(argv) {
-  const out = { url: 'https://chat.deepseek.com/', token: '', profile: '', trace: false };
+  const out = { url: 'https://chat.deepseek.com/', token: '', profile: '', trace: false,
+                parent: 0 };
   for (const a of argv) {
     if (a === '--ds-trace') { out.trace = true; continue; }
     const m = /^--([A-Za-z0-9_-]+)=(.*)$/.exec(a);
@@ -48,6 +49,11 @@ function parseArgv(argv) {
     if (k === 'url') out.url = v || out.url;
     else if (k === 'token') out.token = v;
     else if (k === 'profile') out.profile = v;
+    // ── 实验：让 Electron 自己把窗口设成宿主窗口的**子窗口** ──
+    // 为什么不自己 SetParent（见 5.18 的教训）：跨进程子窗口的键盘通道会全废。
+    // Electron 的 parent 走的是它自己的原生实现（内部也设置 owner/parent），
+    // 所以必须实测"键盘还能不能打字"再决定用不用。默认 0 = 老行为（独立顶层窗口）。
+    else if (k === 'parent') out.parent = parseInt(v, 10) || 0;
   }
   return out;
 }
@@ -98,6 +104,18 @@ const S = {
 };
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// /bounds 的排查日志：只在宿主设了 DSVIEW_BOUNDS_DIAG 时写（平时零开销）。
+// 为什么要写文件：stdout 被宿主读走、stderr 被丢弃，排查"某个接口超时"时
+// 只有落文件才能看到"停在 handler 的哪一行"。
+const BOUNDS_DIAG = process.env.DSVIEW_BOUNDS_DIAG || '';
+// 宿主是否已把本窗口设成它的 owner（Python 用 Win32 设的，Electron 自己看不到，
+// 所以由宿主通过 /owner 告知）。有 owner 时 /bounds **绝不能** show() 一个隐藏窗口
+// —— 那会让主进程卡死，见下面 /bounds 里的说明。
+let OWNER_SET = false;
+function bdiag(msg) {
+  if (!BOUNDS_DIAG) return;
+  try { fs.appendFileSync(BOUNDS_DIAG, new Date().toISOString() + ' ' + msg + '\n'); } catch (e) {}
+}
 function nowIso() { return new Date().toISOString(); }
 function trimText(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n) + '…' : s; }
 
@@ -114,9 +132,48 @@ async function evalJs(expr) {
 async function ensureHelper() {
   if (S.helperReady) return true;
   const r = await evalJs(R.buildHelper());
-  if (r === true) { S.helperReady = true; return true; }
+  if (r === true) {
+    S.helperReady = true;
+    installKeyWatch();          // 顺带装按键计数器（诊断"打字进不去"用）
+    return true;
+  }
   trace('helper 注入失败', r);
   return false;
+}
+
+// ---------- 按键到达监视（只计数，不干预页面） ----------
+// 诊断"光标在闪但打字/粘贴都进不去"时，它是唯一能区分
+// 「键盘消息根本没送到页面」和「送到了但页面没处理」的证据。
+let _keyWatchInstalled = false;
+
+function installKeyWatch() {
+  if (_keyWatchInstalled) return;
+  _keyWatchInstalled = true;
+  const expr = `(() => {
+    if (window.__DSVIEW_KEYWATCH__) return true;
+    var W = { keydown: 0, keypress: 0, beforeinput: 0, paste: 0, composing: 0,
+              lastKey: '', lastAt: 0, focusIn: 0, lastTarget: '', docFocus: null };
+    window.__DSVIEW_KEYWATCH__ = W;
+    function mark(kind, e) {
+      try {
+        W[kind] += 1;
+        W.lastAt = Date.now();
+        W.docFocus = document.hasFocus();
+        var t = e && e.target;
+        W.lastTarget = t ? (t.tagName + (t.type ? '/' + t.type : '')) : '';
+        if (e && e.data) W.lastKey = String(e.data).slice(0, 12);
+        else if (e && e.key !== undefined) W.lastKey = String(e.key).slice(0, 12);
+      } catch (err) {}
+    }
+    document.addEventListener('keydown', function (e) { mark('keydown', e); }, true);
+    document.addEventListener('keypress', function (e) { mark('keypress', e); }, true);
+    document.addEventListener('beforeinput', function (e) { mark('beforeinput', e); }, true);
+    document.addEventListener('paste', function (e) { mark('paste', e); }, true);
+    document.addEventListener('compositionstart', function (e) { mark('composing', e); }, true);
+    document.addEventListener('focusin', function (e) { mark('focusIn', e); }, true);
+    return true;
+  })()`;
+  evalJs(expr).catch(() => {});
 }
 async function pageState() {
   if (!(await ensureHelper())) return { ok: false, reason: 'helper 未注入' };
@@ -726,6 +783,7 @@ function startServer() {
       let url;
       try { url = new URL(req.url, 'http://127.0.0.1'); } catch (e) { return sendJson(res, 400, { ok: false, error: 'bad-url' }); }
       const route = url.pathname;
+      bdiag('请求 ' + req.method + ' ' + route);
       // token 校验：不带或不对一律 403
       if (req.headers['x-token'] !== ARGS.token) return sendJson(res, 403, { ok: false, error: 'forbidden' });
       trace('HTTP', req.method, route);
@@ -807,29 +865,146 @@ function startServer() {
           const text = String(body.text || '');
           const submit = !!body.submit;
           await ensureHelper();
+          // ⚠️ 必须先把光标放进"要写的那个框"：insertText 是往**文档当前选区**插入的，
+          //    不认我们打算写哪个。页面有两个输入框时（登录页的手机号+验证码），
+          //    不先聚焦就会写错框（验收脚本抓到过：写进了旧的 textarea）。
+          const tgt = await evalJs(R.exprFocusTarget());
           const focused = await evalJs(R.exprFocusComposer());
           if (!focused || !focused.ok) {
             return sendJson(res, 200, { ok: false, error: (focused && focused.reason) || '输入框聚焦失败' });
           }
           await sleep(120);
+          // 按目标元素类型选注入手段（不再"先 insertText 再核实+回退"）：
+          //   TEXTAREA / contenteditable → insertText（实测有效，且能唤醒框架的输入绑定）
+          //   INPUT                     → 直接设 value + 派发 input/change
+          //     （实测 insertText 对 <input> **静默无效**：返回成功、value 不变；
+          //       即使先 focus() 也照样写不进去。登录页就是 <input type="tel">。）
+          const isInput = !!(tgt && tgt.ok && tgt.tag === 'input');
           let inserted = false;
-          try { S.win.webContents.insertText(text); inserted = true; } catch (e) {}
-          if (!inserted) return sendJson(res, 200, { ok: false, error: '插入文本失败' });
+          let via = '';
+          let value = '';
+          if (isInput) {
+            // usePin=true：用 focusTarget 钉住的句柄写，避免中间 activeElement 被挪走
+            const fell = await evalJs(R.exprSetComposerValue(text, true, true));
+            inserted = !!(fell && fell.ok);
+            via = 'setValue';
+            value = (fell && fell.value) || '';
+          } else {
+            try { S.win.webContents.insertText(text); inserted = true; via = 'insertText'; } catch (e) {}
+          }
+          if (!inserted) {
+            return sendJson(res, 200, { ok: false, via: via,
+                                        error: '写不进输入框（目标 tag=' +
+                                               ((tgt && tgt.tag) || '?') + '）', target: tgt || null });
+          }
           await sleep(200);
           let sent = null;
           if (submit) sent = await doSend('auto');
-          return sendJson(res, 200, { ok: true, inserted: true, submit: submit, send: sent });
+          return sendJson(res, 200, { ok: inserted, inserted: inserted, via: via,
+                                      value: value, target: tgt || null,
+                                      submit: submit, send: sent });
+        }
+
+        // ── 窗口位置/尺寸：不再 SetParent 嵌入，改成"独立顶层窗口跟着主窗口走" ──
+        // 为什么要放弃 SetParent（2026-09-15 实测）：
+        //   跨进程 SetParent 之后，键盘**整条通道**都废了 —— 不但键盘队列消息送不到，
+        //   连直接 PostMessage 到 Chrome_RenderWidgetHostHWND 的 WM_CHAR 也不生效
+        //   （实测：独立窗口 value='138' 成功；嵌入后同样投递 value=''）。
+        //   而独立顶层窗口是正常的 Win32 窗口，点一下就拿到焦点，打字/粘贴全都正常。
+        if (route === '/bounds') {
+          bdiag('进入 /bounds');
+          const body = await readBody(req);
+          bdiag('读到 body ' + JSON.stringify(body));
+          let x = Math.round(Number(body.x) || 0);
+          let y = Math.round(Number(body.y) || 0);
+          let w = Math.max(200, Math.round(Number(body.w) || 800));
+          let h = Math.max(150, Math.round(Number(body.h) || 600));
+          let applied = false;
+          try {
+            // ⚠️⚠️ 有 owner 时**绝不**在这里 show()。实测（2026-09-16）：owner 设好
+            // 之后，对"隐藏中"的窗口调 show() 会让 Electron 主进程**卡死**（/show
+            // 一直不出结果，宿主 10s 超时）。触发条件是 "owned + hidden"，无 owner
+            // 时 show() 正常（0.03s）。
+            //   · 有 owner：显示交给宿主的 /show —— 它在那之前会先摘掉 owner
+            //     （见 host.show()），所以永远不会踩到这个组合；
+            //   · 无 owner（独立顶层窗口，含 v3.0.0 的用法）：保持原行为，
+            //     `/bounds` 顺带把窗口显示出来（`ds_window_accept.py` 依赖这条）。
+            if (!OWNER_SET) {
+              if (!S.win.isVisible()) S.win.show();
+            }
+            // ⚠️ 子窗口模式下坐标是**相对父窗口客户区**的；独立窗口模式才是屏幕坐标。
+            //    不区分的话子窗口会被摆到屏幕外面（表现为"嵌进去就看不见了"）。
+            const useParent = !!ARGS.parent;
+            bdiag('调用 setBounds ' + JSON.stringify({ x: x, y: y, w: w, h: h, useParent: useParent }));
+            S.win.setBounds({ x: x, y: y, width: w, height: h },
+                            useParent ? ['parent'] : []);
+            applied = true;
+            bdiag('setBounds 完成');
+          } catch (e) {
+            bdiag('setBounds 抛错 ' + String((e && e.message) || e));
+          }
+          return sendJson(res, 200, { ok: applied, bounds: { x: x, y: y, w: w, h: h },
+                                      visible: (() => { try { return S.win.isVisible(); } catch (e) { return null; } })() });
+        }
+
+        // `/focus` 与 `/summon` 共用：**只读一次焦点快照，立刻返回**。
+        //
+        // ⚠️⚠️ 这三条都是 2026-09-16 用诊断日志（每个请求落文件）定位出来的，
+        //    任何一条加回来都会让"退回页签再进来"卡住：
+        //   1. **不 await 等焦点确认**。旧实现在这里轮询 `isFocused()`
+        //      （最多 10×60ms + 一轮 120ms），拿不到前台就一直等 —— 单次请求就能
+        //      把整条 HTTP 通道占到宿主 10s 超时，连带 `set_theme()` 也超时。
+        //   2. **不调 `win.show()`**。窗口有 owner 之后，对 **owned + hidden** 的窗口
+        //      show() 会让 Electron 主进程**同步卡住**（日志里下一个请求空了 63 秒）。
+        //      显示交给宿主：`host.show()` 会"先摘 owner 再 show"（见那边说明）。
+        //   3. **不调 `win.focus()` / `win.moveTop()`**。owner 窗口上这两下同样会卡
+        //      （日志里空了 71 秒）。owner 本来就永远压在宿主之上，不需要 moveTop；
+        //      键盘焦点由 Windows 在用户点击时自己交。
+        //
+        // 所以这里只读状态、不改状态 —— 实测 0.00s，且 focused 值如实反映现实。
+        const focusNow = () => {
+          if (!S.win || S.win.isDestroyed()) return { ok: false, error: '窗口已销毁' };
+          const wc = S.win.webContents;
+          let focused = false;
+          try { focused = !!wc.isFocused(); } catch (e) { focused = false; }
+          return { ok: true, focused: focused,
+                   winFocused: (() => { try { return S.win.isFocused(); } catch (e) { return null; } })(),
+                   wcFocused: (() => { try { return wc.isFocused(); } catch (e) { return null; } })() };
+        };
+
+        if (route === '/summon') {
+          return sendJson(res, 200, focusNow());
         }
 
         // 键盘焦点给回页面。切走再切回来时 WebContents 会丢掉自己的焦点，
         // 表现就是"点进输入框打字没反应"。
+        //
+        // ⚠️⚠️ 这里**绝对不能调 showInactive()**。它按定义是"显示但不激活"，
+        // 会把上一行刚拿到的焦点又撤掉 —— 而 Chromium 认为自己没焦点时**直接不处理
+        // 键盘输入**。旧代码正是「focus() → webContents.focus() → showInactive()」，
+        // 于是 /focus 永远返回 focused:false，嵌入页面永远收不到真实按键
+        // （2026-09-15 实测定位，这是"打字没反应"的直接原因）。
         if (route === '/focus') {
-          if (!S.win || S.win.isDestroyed()) return sendJson(res, 200, { ok: false, error: '窗口已销毁' });
-          let focused = false;
-          try { S.win.focus(); } catch (e) {}
-          try { S.win.webContents.focus(); focused = S.win.webContents.isFocused(); } catch (e) {}
-          try { S.win.showInactive(); } catch (e) {}
-          return sendJson(res, 200, { ok: true, focused: focused });
+          const r = focusNow();
+          trace('/focus ->', r.focused);
+          return sendJson(res, 200, r);
+        }
+
+        // 页面里"用户最后点过的输入框"是什么（诊断 + 界面提示）
+        if (route === '/focused') {
+          if (!(await ensureHelper())) return sendJson(res, 200, { ok: false, error: 'helper 未注入' });
+          const info = await evalJs(R.exprFocusedInfo());
+          return sendJson(res, 200, { ok: !!(info && info.ok), info: info || null });
+        }
+
+        // 置顶开关。独立顶层窗口的代价是"切到别的程序它也不会自动让位"，
+        // 所以用 alwaysOnTop 让它只压在主窗口上面，不压别的应用。
+        if (route === '/topmost') {
+          const body = await readBody(req);
+          const on = !!body.on;
+          try { S.win.setAlwaysOnTop(on, 'normal'); } catch (e) {}
+          return sendJson(res, 200, { ok: true, on: on,
+                                      isTop: (() => { try { return S.win.isAlwaysOnTop(); } catch (e) { return null; } })() });
         }
 
         // 嵌入式流程的一环：Python 先 SetParent 到自己的窗口，再调 /show 让 Electron 自己显示
@@ -845,6 +1020,20 @@ function startServer() {
           return sendJson(res, 200, { ok: true, visible: false });
         }
 
+        // 窗口底色跟着宿主那块面板走。目的只有一个：**消除边界感**。
+        // 页面还没画出来/切换主题的那一瞬间，窗口底色会露出来；如果它是纯白、
+        // 而主窗口那块面板是别的颜色，就会闪出一个"白角"，看起来就是两个软件。
+        // （frame:false 的无边框窗口在 Windows 上本来就没有系统描边/阴影。）
+        if (route === '/bg') {
+          const body = await readBody(req);
+          const color = String(body.color || '').trim();
+          let ok = false;
+          if (/^#[0-9a-fA-F]{6}$/.test(color)) {
+            try { S.win.setBackgroundColor(color); ok = true; } catch (e) {}
+          }
+          return sendJson(res, 200, { ok: ok, color: color });
+        }
+
         // 深浅色跟着宿主的软件走：改的是 Chromium 的 prefers-color-scheme，
         // 官网自己那套浅色/深色配色会跟着切。
         if (route === '/theme') {
@@ -856,6 +1045,113 @@ function startServer() {
             mode: nativeTheme.themeSource,
             dark: !!nativeTheme.shouldUseDarkColors
           });
+        }
+
+        // 把浏览器摆到指定坐标，**只移动**：不动显隐、不抢焦点（宿主拖动/提示恢复用）。
+        // ⚠️ 这里**绝对不能 show()**：提示让位/弹窗让位期间窗口是被有意藏起来的，
+        //    在这里 show 就等于"把浏览器又盖回提示上面"（用户实测反馈过的遮挡问题）。
+        //    需要显示时由宿主显式走 /show（它会先摘 owner 再 show）。
+        // ⚠️ 也不 setBounds 之外的任何激活类调用（moveTop/focus）。
+        if (route === '/restore') {
+          const body = await readBody(req);
+          if (!S.win || S.win.isDestroyed()) return sendJson(res, 200, { ok: false, error: '窗口已销毁' });
+          let applied = false;
+          try {
+            const has = (typeof body.x === 'number' && typeof body.y === 'number'
+                         && typeof body.w === 'number' && typeof body.h === 'number');
+            if (has) {
+              const useParent = !!ARGS.parent;
+              bdiag('/restore setBounds ' + JSON.stringify(body) + ' useParent=' + useParent);
+              S.win.setBounds({ x: Math.round(body.x), y: Math.round(body.y),
+                                width: Math.max(200, Math.round(body.w)),
+                                height: Math.max(150, Math.round(body.h)) },
+                              useParent ? ['parent'] : []);
+            }
+            applied = true;
+          } catch (e) {
+            trace('/restore 失败', String((e && e.message) || e));
+          }
+          return sendJson(res, 200, { ok: applied, visible: (() => {
+            try { return S.win.isVisible(); } catch (e) { return null; } })() });
+        }
+
+        // 窗口形态自检（真嵌入实验/验收用）：父窗口、是否相对父窗口定位、边框状态。
+        // 为什么要这条：`BrowserWindow{parent}` 之后，窗口到底有没有变成**子窗口**、
+        // 坐标是屏幕坐标还是相对父窗口，光看 Python 侧的 GetParent 不够（Electron
+        // 可能只是建了 owner 关系）。这里把 native 侧的答案一次问清楚。
+        if (route === '/wininfo') {
+          const out = { ok: true, pid: process.pid, hwnd: S.hwnd };
+          try {
+            const buf = S.win.getNativeWindowHandle();
+            const h = (buf && buf.length >= 8) ? buf.readBigUInt64LE(0) : BigInt(0);
+            out.nativeHwnd = h.toString();
+            // 用 koffi/ffi 太笨重；Win32 的 GetParent 交给调用方（Python）去查即可
+          } catch (e) {}
+          try { out.bounds = S.win.getBounds(); } catch (e) {}
+          try { out.contentBounds = S.win.getContentBounds(); } catch (e) {}
+          try { out.visible = S.win.isVisible(); } catch (e) {}
+          try { out.focused = S.win.isFocused(); } catch (e) {}
+          out.parentArg = ARGS.parent || 0;
+          out.topmost = (() => { try { return S.win.isAlwaysOnTop(); } catch (e) { return null; } })();
+          return sendJson(res, 200, out);
+        }
+
+        // 执行一段页面侧表达式并回读结果。
+        // 用途：验收"真实键盘到底打进去了没有" —— 光看 win32 焦点/页面 hasFocus()
+        // 都不算数（v3.0.0 就是"光标在闪但字进不去"），必须回读**页面里真实的文本**。
+        // 只用来读，测试脚本用；不对外暴露（仍受 X-DSH-Token 保护）。
+        if (route === '/debug/eval') {
+          const body = await readBody(req);
+          const expr = String((body && body.expr) || '');
+          let out = null, err = '';
+          try {
+            out = await S.win.webContents.executeJavaScript(expr, true);
+          } catch (e) {
+            err = String((e && e.message) || e);
+          }
+          return sendJson(res, 200, { ok: !err, result: out === undefined ? null : out, error: err });
+        }
+
+        // 把页面的输入框聚焦好（**只聚焦，不写任何文字**）。
+        // 用途：验收"真实键盘"时要把变量隔离掉 —— 不能既用注入文字又把焦点交给页面，
+        // 否则分不清字是"打进去的"还是"注入进去的"。
+        if (route === '/debug/focus-composer') {
+          if (!(await ensureHelper())) return sendJson(res, 200, { ok: false, error: 'helper 未注入' });
+          const r = await evalJs(R.exprFocusComposer());
+          return sendJson(res, 200, { ok: !!(r && r.ok), result: r || null });
+        }
+
+        // 告知 Electron：宿主已把本窗口设成它的 owner（或已解除）。
+        // 目的只有一个 —— 让 /bounds 知道"有 owner 时不能对隐藏窗口 show()"
+        // （那个组合会让主进程卡死，见 /bounds 里的说明）。
+        if (route === '/owner') {
+          const body = await readBody(req);
+          OWNER_SET = !!body.on;
+          bdiag('OWNER_SET -> ' + OWNER_SET);
+          return sendJson(res, 200, { ok: true, ownerSet: OWNER_SET });
+        }
+
+        // 把页面上"还没发出去"的附件点掉（取消发送后用）。
+        // ⚠️ 为什么需要：取消后附件会留在输入区，下一次发送的 `_ensure_idle()`
+        // 会判定"输入区还挂着 N 个附件"而拒绝继续，用户看到的是"取消了却一直
+        // 让我等 / 让我自己去页面上删"（用户实测反馈）。
+        if (route === '/debug/clear-attachments') {
+          if (!(await ensureHelper())) return sendJson(res, 200, { ok: false, error: 'helper 未注入' });
+          const before = await evalJs(R.exprCountWithNames([]));
+          let removed = 0, err = '';
+          try {
+            const r = await evalJs(R.exprRemoveAttachments());
+            if (r && typeof r === 'object') {
+              removed = Number(r.removed || 0);
+              err = String(r.error || '');
+            } else {
+              removed = Number(r || 0);
+            }
+          } catch (e) {
+            err = String((e && e.message) || e);
+          }
+          trace('/debug/clear-attachments ->', { before: before, removed: removed, err: err });
+          return sendJson(res, 200, { ok: !err, removed: removed, before: before, error: err });
         }
 
         if (route === '/diag') {
@@ -911,16 +1207,28 @@ function currentUrl() {
 
 // ---------- 窗口 ----------
 function createWindow() {
+  // ⚠️ 只有显式给了 --parent=<HWND> 才建子窗口；默认仍是"独立顶层窗口 + 跟着摆位"
+  //    （2026-09-15 实测：跨进程 SetParent 会让键盘整条通道全废，见 5.18）。
+  //    这条分支是**实验性的**，用它之前必须验"能不能真打字"。
+  const asChild = !!ARGS.parent;
   const win = new BrowserWindow({
-    // show:false —— Python 会先 SetParent 把它嵌进自己的窗口，再调 POST /show；
-    // 这样不会在屏幕左上角闪一个还没嵌入的 1000x700 窗口。
+    // show:false —— 摆好位（Python 的 /bounds）之前绝不显示；
+    // 这样不会在屏幕左上角闪一个还没摆位的 1000x700 窗口。
     show: false,
     frame: false,
     width: 1000,
     height: 700,
     x: 0,
     y: 0,
-    backgroundColor: '#ffffff',
+    // 子窗口模式：交给 Electron 自己设 parent，它比手工 SetParent 更"正规"
+    // （焦点/owner 语义由它维护）。父窗口句柄从命令行来。
+    ...(asChild ? { parent: ARGS.parent } : {}),
+    // 底色由宿主用 /bg 同步成主窗口那块面板的颜色（默认给个浅灰蓝，
+    // 比纯白更接近面板色，避免加载瞬间闪白角）。
+    backgroundColor: '#f7f8fc',
+    // Windows 11 会给无边框窗口加圆角，而宿主那块矩形是直的 ——
+    // 关掉它，四角才对得上（少一处"两个软件"的边界感）。
+    roundedCorners: false,
     // focusable 必须是 true —— 用户要在这个页面里输入手机号/验证码。
     // （早期设成 false，窗口带 WS_EX_NOACTIVATE，键盘输入根本进不来，
     //   表现为"官网能看不能填"。Enter/Escape 走 CDP 注入，不依赖焦点。）

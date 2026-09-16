@@ -48,3 +48,8 @@ key_status.txt
 .idea/
 Thumbs.db
 desktop.ini
+wv2_*_profile/
+wv2_profile/
+wv2_ud_*/
+_test_wv2_settings
+_speed_settings

@@ -15,6 +15,10 @@ class MediaResolver:
         self.aes_key = aes_key
         self.data_dir = data_dir
         self.log = log_func or (lambda msg: None)
+        # 批量原生解密的缓存：{dat_path: (ext, b64)}。命中就完全不起 node 进程。
+        self._native_cache = {}
+        # 已经对哪些目录做过批量解密（避免同一目录反复批处理）
+        self._native_batch_tried = set()
 
     def resolve_images(self, messages: list, session_wxid: str, try_native: bool = True) -> list:
         enriched = []
@@ -221,14 +225,133 @@ class MediaResolver:
         return ''
 
     def _decrypt_with_native(self, filepath: str) -> tuple:
-        """调用 Node.js helper 解密 .dat 文件 (从 DLL 取 code → derive AES key → 解密 → WXGF 剥壳)"""
-        import subprocess, shutil
-        node = shutil.which('node') or shutil.which('node.exe') or ''
+        """解密 .dat 文件（Rust 原生模块，经 node）。
+
+        ⚠️ 2026-09-15 改成**批量**：旧实现是"一张图起一个 node 进程"，每次都重新
+        require koffi、重新加载原生模块、重新 load(wx_key.dll) 取 code —— 用户实测
+        400 张图要十几分钟。现在首次调用会把这个目录（及其子目录）里的 .dat **一次
+        批处理掉**，之后全部命中缓存；一次 node 调用只付一次启动开销。
+        另一个好处：不再一图一进程，孤儿进程风险一起消掉。
+        """
+        # 1) 先查批量缓存
+        try:
+            hit = self._native_cache.get(filepath)
+        except Exception:
+            hit = None
+        if hit is not None:
+            return hit
+        # 2) 没命中 → 对这个目录做一次批量解密，再查
+        if not getattr(self, '_native_batch_tried', None):
+            self._native_batch_tried = set()
+        try:
+            folder = os.path.dirname(filepath)
+            if folder and folder not in self._native_batch_tried:
+                self._native_batch_tried.add(folder)
+                self._decrypt_batch_in_dir(folder)
+                hit = self._native_cache.get(filepath)
+                if hit is not None:
+                    return hit
+        except Exception:
+            pass
+        # 3) 批量没覆盖到（例如文件不在那个目录）→ 退回单文件一次
+        try:
+            return self._decrypt_one_with_native(filepath)
+        except Exception:
+            return ('', '')
+
+    def _decrypt_batch_in_dir(self, folder: str, limit: int = 300) -> int:
+        """把这个目录（含子目录，最多往下 3 层）里的 .dat 一次性交给 node 批处理。
+
+        为什么限制范围/数量：微信数据目录里 .dat 可能上万，全量批处理会拖慢首次导出。
+        实测同目录的图片通常在同一批里，取 300 张做"预热"收益最大、代价可控；
+        超出部分会走后面的单文件兜底。
+        返回成功解出的张数。
+        """
+        import subprocess, json as _json
+        node = self._find_node()
         if not node:
-            for p in [os.path.join(os.path.dirname(__file__), '..', 'runtime', 'node.exe'),
-                      os.path.join(os.path.dirname(__file__), '..', 'APP', 'WeChatExport', 'runtime', 'node.exe')]:
-                if os.path.exists(p):
-                    node = p; break
+            return 0
+        scripts_dir = os.path.join(os.path.dirname(__file__), '..', 'scripts')
+        helper = os.path.join(scripts_dir, 'decrypt_image.js')
+        if not os.path.exists(helper):
+            return 0
+        paths = []
+        base_depth = folder.rstrip('\\/').count(os.sep)
+        try:
+            for dp, dns, fns in os.walk(folder):
+                if dp.count(os.sep) - base_depth >= 3:
+                    dns[:] = []          # 不再往下钻
+                for fn in fns:
+                    if fn.lower().endswith('.dat'):
+                        paths.append(os.path.join(dp, fn))
+                        if len(paths) >= limit:
+                            break
+                if len(paths) >= limit:
+                    break
+        except OSError:
+            return 0
+        if not paths:
+            return 0
+        self.log(f"图片: 批量原生解密 {len(paths)} 个 .dat（1 个 node 进程）")
+        try:
+            req = _json.dumps({'dataDir': self.data_dir, 'paths': paths}).encode('utf-8')
+            startupinfo = None
+            if hasattr(subprocess, 'STARTUPINFO'):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0      # SW_HIDE
+            # 超时给足：每张 2 秒 + 底 180 秒（个别图要走 ffmpeg 抽帧，会慢）
+            timeout = max(180, len(paths) * 2)
+            r = subprocess.run([node, helper, '--batch'],
+                               input=req, capture_output=True, timeout=timeout,
+                               cwd=scripts_dir, startupinfo=startupinfo,
+                               creationflags=0x08000000 if os.name == 'nt' else 0)
+            ok_n = 0
+            for line in (r.stdout or b'').decode('utf-8', 'replace').splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get('summary'):
+                    # 汇总行：账号匹配统计（issue #2 排查用）
+                    st = rec.get('stat') or {}
+                    self.log("图片: 账号匹配 精确=%s 前缀=%s 回退=%s 无账号=%s（DLL 里 %s 个账号）%s"
+                             % (st.get('exact', 0), st.get('prefix', 0),
+                                st.get('fallback', 0), st.get('noaccount', 0),
+                                rec.get('accounts'), rec.get('note') or ''))
+                    continue
+                p = rec.get('path') or ''
+                if not p:
+                    continue
+                if rec.get('ok') and rec.get('ext') and rec.get('b64'):
+                    self._native_cache[p] = (rec['ext'], rec['b64'])
+                    ok_n += 1
+                else:
+                    # 记成空，避免同一张图反复重试
+                    self._native_cache.setdefault(p, ('', ''))
+            self.log(f"图片: 批量原生解密完成，成功 {ok_n}/{len(paths)}")
+            return ok_n
+        except Exception as e:  # noqa: BLE001
+            self.log(f"图片: 批量原生解密失败（{type(e).__name__}: {e}）")
+            return 0
+
+    def _find_node(self) -> str:
+        """找 node/runtime。包内优先自带的 runtime\\node.exe。"""
+        import shutil
+        base = os.path.join(os.path.dirname(__file__), '..')
+        for p in (os.path.join(base, 'runtime', 'node.exe'),
+                  os.path.join(base, 'APP', 'WeChatExport', 'runtime', 'node.exe')):
+            if os.path.exists(p):
+                return p
+        return shutil.which('node') or shutil.which('node.exe') or ''
+
+    def _decrypt_one_with_native(self, filepath: str) -> tuple:
+        """单文件兜底（批量用不上时才走这里）。"""
+        import subprocess
+        node = self._find_node()
         if not node:
             return ('', '')
         scripts_dir = os.path.join(os.path.dirname(__file__), '..', 'scripts')

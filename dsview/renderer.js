@@ -123,6 +123,97 @@ function buildHelper() {
     } catch (e) {}
   }
 
+  // ---------- 记住"用户最后点过的输入框" ----------
+  // 为什么需要：登录页有两个 <input type="tel">（手机号、验证码），聊天页是一个
+  // textarea。"把文字写进当前输入框"必须知道哪个是用户刚点的那个 —— 靠
+  // document.activeElement 在页面失去焦点时会不准，所以用 focusin 把它记下来。
+  var FOCUSED = null;
+  try {
+    document.addEventListener('focusin', function (e) {
+      var t = e && e.target;
+      if (!t) return;
+      var tag = (t.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) {
+        FOCUSED = t;
+      }
+    }, true);
+  } catch (e) {}
+
+  function focusedTarget() {
+    // 诊断：把三个候选都记下来，排查"写错框"时一眼看出是谁的锅
+    var dbg = { activeTag: '', storedTag: '', fallbackTag: '' };
+    try {
+      var a0 = document.activeElement;
+      if (a0) dbg.activeTag = (a0.tagName || '').toLowerCase();
+    } catch (e) {}
+    try {
+      if (FOCUSED) dbg.storedTag = (FOCUSED.tagName || '').toLowerCase();
+    } catch (e) {}
+    // 优先用"真的还是活动元素"的那个；退回到记录值；再退回到 findComposer
+    try {
+      var a = document.activeElement;
+      if (a) {
+        var tag = (a.tagName || '').toUpperCase();
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || a.isContentEditable) {
+          focusedTarget.dbg = dbg;
+          return a;
+        }
+      }
+    } catch (e) {}
+    try {
+      if (FOCUSED && document.contains(FOCUSED)) {
+        focusedTarget.dbg = dbg;
+        return FOCUSED;
+      }
+    } catch (e) {}
+    var fb = findComposer();
+    try { if (fb) dbg.fallbackTag = (fb.tagName || '').toLowerCase(); } catch (e) {}
+    focusedTarget.dbg = dbg;
+    return fb;
+  }
+
+  function focusedInfo() {
+    var t = focusedTarget();
+    if (!t) return { ok: false, reason: '页面里没有可写的输入框' };
+    var r = rectOf(t);
+    return { ok: true, tag: (t.tagName || '').toLowerCase(),
+             type: t.getAttribute ? (t.getAttribute('type') || '') : '',
+             placeholder: (t.getAttribute && (t.getAttribute('placeholder') || '')) || '',
+             editable: t.isContentEditable === true,
+             rect: r,
+             value: String(t.value == null ? '' : t.value).slice(0, 40) };
+  }
+
+  // 把光标真正放进"要写的那个框"。
+  // ⚠️ 必须做这一步：webContents.insertText 是往**文档当前选区**插入的，
+  //    不认我们"打算写哪个框"。实测：页面上有两个框时，先 focus 了 input#a，
+  //    但选区还留在 textarea#b，insertText 就写进了 b（验收脚本抓到过）。
+  function focusTarget() {
+    var t = focusedTarget();
+    if (!t) return { ok: false, reason: '页面里没有可写的输入框' };
+    try {
+      t.focus();
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') {
+        var n = t.value == null ? 0 : String(t.value).length;
+        try { t.setSelectionRange(n, n); } catch (e) {}
+      } else {
+        var sel = window.getSelection();
+        var rg = document.createRange();
+        rg.selectNodeContents(t);
+        rg.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(rg);
+      }
+      FOCUSED = t;
+      TARGET = t;                 // 钉住句柄，后面写值就用它，不再依赖 activeElement
+      return { ok: true, tag: (t.tagName || '').toLowerCase(),
+               placeholder: (t.getAttribute && (t.getAttribute('placeholder') || '')) || '',
+               dbg: focusedTarget.dbg || null };
+    } catch (e) {
+      return { ok: false, reason: String((e && e.message) || e) };
+    }
+  }
+
   // ---------- 本次会话已注入的附件名单 ----------
   // /state 拿不到调用方传入的路径，所以把最近一次 attach 注入的文件名记在页面里，
   // 这样 /state.attachments 和停止按钮判定都能用上「确切的文件名」这个最强证据。
@@ -161,29 +252,38 @@ function buildHelper() {
   //   1) 可编辑（contenteditable=true）
   //   2) role=textbox / role=combobox
   //   3) 刚被设成 contenteditable=false 的输入框
-  function visibleEditables(sel) {
+  // allowInput=false 时跳过所有 <input>（只认 textarea/contenteditable）。
+  // 为什么需要 allowInput：聊天 composer 是 textarea，但**登录页**的输入框是
+  // <input type="tel">。默认跳过 input 能避免误抓页面上别的输入框（历史行为），
+  // 只有前几档都没匹配到、退到最后一档时才允许 input —— 见 editableNodes。
+  function visibleEditables(sel, allowInput) {
     var out = [];
     try {
       var list = document.querySelectorAll(sel);
       for (var i = 0; i < list.length; i++) {
         var el = list[i];
-        if (el.tagName === 'INPUT') continue;
+        if (!allowInput && el.tagName === 'INPUT') continue;
         if (!visible(el)) continue;
         var r = el.getBoundingClientRect();
-        if (r.width < 80 || r.height < 12) continue;
+        // 登录框比聊天输入框小，阈值放宽一点（高度 12→10，宽度 80→60）
+        if (r.width < 60 || r.height < 10) continue;
         out.push(el);
       }
     } catch (e) {}
     return out;
   }
   function editableNodes() {
+    // 每档 [选择器, 是否允许 <input>]。前两档不许 input：聊天 composer 一定是
+    // textarea/contenteditable，允许 input 会误抓搜索框。只有都没匹配上时，
+    // 才退到"普通输入框" —— 那是登录页（实测 <input type="tel"> class=ds-input__input）。
     var tiers = [
-      'textarea, [contenteditable="true"], [contenteditable=""]',
-      '[role="textbox"], [role="combobox"]',
-      '[contenteditable="false"]'
+      ['textarea, [contenteditable="true"], [contenteditable=""]', false],
+      ['[role="textbox"], [role="combobox"]', false],
+      ['input[type="text"], input[type="tel"], input[type="email"], input[type="password"], input:not([type])', true],
+      ['[contenteditable="false"]', false]
     ];
     for (var t = 0; t < tiers.length; t++) {
-      var got = visibleEditables(tiers[t]);
+      var got = visibleEditables(tiers[t][0], tiers[t][1]);
       if (got.length) return got;
     }
     return [];
@@ -1050,6 +1150,54 @@ function buildHelper() {
     return { ok: true, empty: norm(v).length === 0, len: norm(v).length, editable: true };
   }
 
+  // 当前 composer 里是不是已经有这段文字（用来核实 insertText 到底生没生效）。
+  function composerHasText(text) {
+    var a = focusedTarget();
+    if (!a) return false;
+    var want = norm(text);
+    if (!want) return true;
+    var have = a.tagName === 'TEXTAREA' || a.tagName === 'INPUT'
+      ? String(a.value || '') : txt(a);
+    return norm(have).indexOf(want) >= 0;
+  }
+
+  // 目标句柄一览。为什么要有它：实测"聚焦"和"写值"之间哪怕隔 120ms，
+  // document.activeElement 也可能被页面自己挪走（探针页上就复现了：聚焦 input 后
+  // 又跑回 textarea），于是写值写到了别的框。**记住句柄、别重复查询**才是稳的。
+  var TARGET = null;
+
+  // 兜底注入：直接设 value 并派发 input/change。
+  // 关键点是用原型上的 value setter —— 受控组件（React/Vue）只认原生 setter 触发的事件，
+  // 直接 el.value = x 不会唤醒它们的 onChange，登录/发送按钮的状态就不会更新。
+  // append=true 时接在原有内容后面（模拟"继续打字"，而不是整段替换）。
+  function setComposerValue(text, append, usePin) {
+    var a = (usePin && TARGET) ? TARGET : focusedTarget();
+    if (!a) return { ok: false, reason: '找不到输入框' };
+    var val = String(text == null ? '' : text);
+    try {
+      if (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') {
+        var cur = String(a.value == null ? '' : a.value);
+        if (append) val = cur + val;
+        var proto = a.tagName === 'INPUT'
+          ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+        var d = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (d && d.set) d.set.call(a, val); else a.value = val;
+        a.dispatchEvent(new Event('input', { bubbles: true }));
+        a.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        // contenteditable：用 insertText 之外的办法不好办，交给 execCommand
+        a.focus();
+        document.execCommand('insertText', false, val);
+      }
+      return { ok: true, value: String(a.value == null ? '' : a.value).slice(0, 60),
+               usedTag: (a.tagName || '').toLowerCase(),
+               placeholder: (a.getAttribute && (a.getAttribute('placeholder') || '')) || '',
+               dbg: focusedTarget.dbg || null };
+    } catch (e) {
+      return { ok: false, reason: String((e && e.message) || e) };
+    }
+  }
+
   // ---------- 诊断快照 ----------
   function snapRect(el) { return el ? rectOf(el) : null; }
   function diag() {
@@ -1124,6 +1272,11 @@ function buildHelper() {
     attachmentsCleared: attachmentsCleared,
     focusComposer: focusComposer,
     composerEmpty: composerEmpty,
+    composerHasText: composerHasText,
+    setComposerValue: setComposerValue,
+    focusedTarget: focusedTarget,
+    focusedInfo: focusedInfo,
+    focusTarget: focusTarget,
     log: LOG
   };
   return true;
@@ -1178,6 +1331,84 @@ function exprAttachmentsCleared() {
   return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.attachmentsCleared() : {ok:false,reason:'helper 未注入'})`;
 }
 
+// 把页面上"还没发出去"的附件点掉（取消发送后清理用）。
+// ⚠️ 这段是**独立表达式**（不挂 helper）：每次重新查 DOM，而且点了删除之后要重新查
+//    —— 页面的删除是重渲染式的（整个列表重建），握着旧节点会点到已脱离文档的元素上。
+// ⚠️ 只点**最内层**的删除节点：第一版把"文本里带 × 的所有元素"都点了，结果父容器
+//    也被点了一遍（removed 报到 40，实际附件一个没少）。
+function exprRemoveAttachments() {
+  return `(function(){
+    var removed = 0;
+    function isRemoveNode(el) {
+      var t = (el.textContent || '').trim();
+      var al = (el.getAttribute && (el.getAttribute('aria-label') || '')) || '';
+      var cls = String(el.className || '');
+      // 有子元素的容器不算（只点最内层那个 × / 删除钮）
+      if (el.children && el.children.length > 0 && t.length > 1) return false;
+      if (t === '×' || t === '✕' || t === 'x' || t === '✖') return true;
+      if (/remov|delete|close/i.test(al) || /remov|delete|close/i.test(cls)) return true;
+      if (/删除|移除/.test(al) || /删除|移除/.test(t)) return true;
+      return false;
+    }
+    for (var round = 0; round < 60; round++) {
+      var target = null;
+      var marked = document.querySelectorAll('[data-ds-attachment]');
+      for (var i = 0; i < marked.length; i++) {
+        var cands = marked[i].querySelectorAll('*');
+        // 从**后往前**找：删除钮通常在条目的末尾
+        for (var k = cands.length - 1; k >= 0; k--) {
+          if (isRemoveNode(cands[k])) { target = cands[k]; break; }
+        }
+        if (target) break;
+      }
+      if (!target) {
+        // 兜底：真实页面没有 data-ds-attachment 标记，按"删除钮"特征找
+        var all = document.querySelectorAll('button, [role="button"], span, i');
+        var best = null;
+        for (var j = 0; j < all.length; j++) {
+          if (!isRemoveNode(all[j])) continue;
+          var host = all[j].closest
+            ? all[j].closest('[class*="attach"],[class*="file"],[class*="chip"],li')
+            : null;
+          if (!host) continue;
+          best = all[j];   // 只点最后一个（最靠近列表末尾的那个删除钮）
+        }
+        target = best;
+      }
+      if (!target) break;
+      try {
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      } catch (e) {
+        try { target.click(); } catch (e2) { break; }
+      }
+      removed++;
+    }
+    return { ok: true, removed: removed };
+  })()`;
+}
+
+function exprSetComposerValue(text, append, usePin) {
+  // 兜底注入：insertText 对 <input> 静默无效时用这个。
+  // 必须走原型上的 value setter —— 直接 el.value = x 对受控组件（React/Vue）
+  // 不会触发它们的 onChange，按钮状态不会更新。
+  // usePin=true 时用 focusTarget 钉住的句柄写（不信 activeElement，见 TARGET 的注释）。
+  return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.setComposerValue(${JSON.stringify(text || '')}, ${append ? 'true' : 'false'}, ${usePin ? 'true' : 'false'}) : {ok:false,reason:'helper 未注入'})`;
+}
+
+function exprComposerHasText(text) {
+  return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.composerHasText(${JSON.stringify(text || '')}) : false)`;
+}
+
+// 页面里"用户最后点过的输入框"的信息（诊断 + 界面提示用）
+function exprFocusedInfo() {
+  return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.focusedInfo() : {ok:false,reason:'helper 未注入'})`;
+}
+
+// 把光标放进"要写的那个框"（/type 之前必须调，否则 insertText 会写到旧选区）
+function exprFocusTarget() {
+  return `(window.${HELPER_NAME} ? window.${HELPER_NAME}.focusTarget() : {ok:false,reason:'helper 未注入'})`;
+}
+
 module.exports = {
   HELPER_NAME,
   buildHelper,
@@ -1195,5 +1426,10 @@ module.exports = {
   exprClearAttached,
   exprFocusComposer,
   exprComposerEmpty,
-  exprAttachmentsCleared
+  exprComposerHasText,
+  exprSetComposerValue,
+  exprFocusedInfo,
+  exprFocusTarget,
+  exprAttachmentsCleared,
+  exprRemoveAttachments
 };

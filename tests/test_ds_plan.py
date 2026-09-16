@@ -71,16 +71,19 @@ def test_plan_batches_fills_across_chats(tmp_path):
     _mk_export(str(tmp_path))
     units = P.scan_export_dir(str(tmp_path))
     batches = P.plan_from_units(units)
-    # 4 个文档 + 63 张图 = 67 → 50 + 17
-    assert [len(b) for b in batches] == [50, 17]
-    # 第一批 = 4 个文档 + 群聊A 的 3 张 + 群聊B 的前 43 张
+    # 4 个文档 + 63 张图 = 67 → 30 + 30 + 7（默认每批 30）
+    assert [len(b) for b in batches] == [30, 30, 7]
+    # 第一批 = 4 个文档 + 群聊A 的 3 张 + 群聊B 的前 23 张
     first = batches[0]
     assert os.path.basename(first[0]) == '给AI的指令.txt'
     assert sum(1 for p in first if p.endswith('.md')) == 2
-    assert sum(1 for p in first if p.endswith('.jpg')) == 46
-    # 第二批就是群聊B 剩下的 17 张（60 - 43）
-    assert len(batches[1]) == 17
-    assert all(p.endswith('.jpg') for p in batches[1])
+    assert sum(1 for p in first if p.endswith('.jpg')) == 26
+    # 跨会话凑满：第一批里两个群的图片都有（不是按群切开）
+    assert any('群聊A_图片' in p for p in first)
+    assert any('群聊B_图片' in p for p in first)
+    # 最后一批就是群聊B 剩下的 7 张（60 - 23 - 30）
+    assert len(batches[2]) == 7
+    assert all(p.endswith('.jpg') for p in batches[2])
     # 不丢不重
     flat = [p for b in batches for p in b]
     assert flat == P.expand_units(units)
@@ -89,12 +92,14 @@ def test_plan_batches_fills_across_chats(tmp_path):
 def test_plan_batches_edge_cases():
     assert P.plan_batches([]) == []
     assert P.plan_batches(['a']) == [['a']]
-    assert [len(b) for b in P.plan_batches([str(i) for i in range(100)])] == [50, 50]
-    assert [len(b) for b in P.plan_batches([str(i) for i in range(101)])] == [50, 50, 1]
-    # limit 非法值要有确定行为：0/None 当作"没传"用默认 50；负数至少切成 1 个一批
+    assert [len(b) for b in P.plan_batches([str(i) for i in range(60)])] == [30, 30]
+    assert [len(b) for b in P.plan_batches([str(i) for i in range(61)])] == [30, 30, 1]
+    # limit 非法值要有确定行为：0/None 当作"没传"用默认 30；负数至少切成 1 个一批
     assert [len(b) for b in P.plan_batches(['a', 'b'], limit=0)] == [2]
     assert [len(b) for b in P.plan_batches(['a', 'b'], limit=None)] == [2]
     assert [len(b) for b in P.plan_batches(['a', 'b'], limit=-5)] == [1, 1]
+    # 默认值必须和"实测安全上限"一致：40 个就会被官网拒收，30 是上限
+    assert P.DEFAULT_LIMIT == 30
 
 
 def test_summarize(tmp_path):
@@ -103,8 +108,8 @@ def test_summarize(tmp_path):
     assert s['files'] == 67
     assert s['docs'] == 4
     assert s['images'] == 63
-    assert s['batches'] == 2
-    assert s['batch_sizes'] == [50, 17]
+    assert s['batches'] == 3
+    assert s['batch_sizes'] == [30, 30, 7]
 
 
 def test_oversize_and_missing(tmp_path):

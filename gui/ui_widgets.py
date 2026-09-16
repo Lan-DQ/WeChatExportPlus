@@ -158,6 +158,15 @@ class Surface:
         cv = self.canvas
 
         def handler(event):
+            # ⚠️ 画布上按下鼠标 = 用户把注意力从输入框移开了。
+            # tk.Entry 是叠在画布上的**真实控件**，点画布不会自动夺走它的键盘焦点：
+            # 于是搜索完再点列表，用户接着敲键盘还是打进搜索框（用户反馈的
+            # "输入关键词后鼠标光标会停留在输入框"就是这个）。这里补一次焦点交接。
+            try:
+                if _semantic(event) in ('ButtonPress-1', 'ButtonPress-2', 'ButtonPress-3'):
+                    cv.focus_set()
+            except Exception:                # noqa: BLE001
+                pass
             return self.dispatch_input(event)
 
         cv.bind('<Motion>', handler, add='+')
@@ -649,6 +658,22 @@ class CheckList:
                 self.on_toggle(self.items[i])
             self.draw()
 
+    def item_index(self, row):
+        """把**可见行号**换算成 items 下标。
+
+        ★ 搜索 bug 的根因就在这：`_row_at()` 返回的是 `self.view` 里的**可见行号**，
+        而 `self.items` 是**完整列表**。搜索过滤后 `view[row] != row`，
+        直接拿 row 去索引 items 就会打开/勾选**完全无关的会话**
+        （用户实测："输入关键词后点击会话会跳出随机会话"）。
+        所有"点击 → 定位数据"的地方都必须先过这个换算。
+        """
+        try:
+            if 0 <= row < len(self.view):
+                return self.view[row]
+        except Exception:
+            pass
+        return -1
+
     # ── 交互 ──
 
     CHECKBOX_HIT = 40      # 行左侧这么多像素内算"点在勾选框上"
@@ -743,6 +768,17 @@ class CheckList:
         return idx if 0 <= idx < len(self.view) else -1
 
     def _on_motion(self, e):
+        """鼠标移动 → 悬停高亮。
+
+        ⚠️⚠️ `hover_row` 存的是 **items 下标**，不是可见行号。
+        事故（用户实测："搜索词填完后鼠标移动到会话上会话没有变灰"）：
+        `_row_at()` 返回的是 **view 里的可见行号**，而 `_draw_row` 拿 `hover_row`
+        直接当 `items` 下标用（`idx == self.hover_row` 里的 idx 是 items 下标）。
+        不过滤时两者相等，所以一直没暴露；**一搜索 `view[row] != row`**，
+        悬停可见第 0 行会把 items[0] 点亮 —— 用户看到的就是"移上去没反应"
+        （高亮跑到别的行去了）。这和 `_on_click` 那个"点会话跳出随机会话"
+        是同一个根因的两面，两处都必须过 `item_index()` 换算。
+        """
         # 没落在列表里就不消费事件，让后面的控件（如下拉框）自己处理
         if not self._inside_body(e.x, e.y):
             if self.hover_row != -1:
@@ -750,7 +786,7 @@ class CheckList:
                 self.hover_row = -1
                 self._repaint_rows([old])
             return None
-        i = self._row_at(e.y)
+        i = self.item_index(self._row_at(e.y))
         if i != self.hover_row:
             old = self.hover_row
             self.hover_row = i
@@ -903,17 +939,23 @@ class CheckList:
         i, where = self._hit(e)
         if i < 0:
             return None
+        # i 是"可见行号"，必须先换算成 items 下标（搜索过滤后两者不同！）
+        item_i = self.item_index(i)
+        if item_i < 0:
+            return None
         if where == 'check':
-            self.toggle_index(i)
+            self.toggle_index(item_i)
         elif where == 'row' and self.on_open:
-            self.on_open(self.items[i])
+            self.on_open(self.items[item_i])
         return 'break'
 
     def _on_double(self, e):
         i, where = self._hit(e)
         if i >= 0 and where == 'row' and self.on_open:
-            self.on_open(self.items[i])
-            return 'break'
+            item_i = self.item_index(i)
+            if item_i >= 0:
+                self.on_open(self.items[item_i])
+                return 'break'
         return None
 
     def _wheel_at(self, e, d):

@@ -3,15 +3,36 @@
 
 每个问题都是真实发生过的，用断言把正确状态固定下来。
 """
+import itertools
+import os
+import subprocess
 import sys
 import time
 import tkinter as tk
 
 import pytest
 
-sys.path.insert(0, r'C:\My_GongJu\grab\WeChatExportPlus\gui')
-sys.path.insert(0, r'C:\My_GongJu\grab\WeChatExportPlus\exporters')
-sys.path.insert(0, r'C:\My_GongJu\grab\WeChatExportPlus\scripts')
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'gui'))
+sys.path.insert(0, os.path.join(ROOT, 'exporters'))
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+
+import app_plus as _A       # noqa: E402  （布局表是纯函数，测试直接调它）
+
+
+def test_renderer_js_template_intact():
+    """`dsview/renderer.js` 必须语法正确、且模板没被反引号截断。
+
+    事故（接管文档 5.1，2026-09-15 一天踩了三次）：renderer.js 整个是一个
+    ``String.raw`` 模板字符串，helper 源码被塞在模板里当字符串注入。往**注释**里
+    写一个反引号就会提前结束模板 → 语法错误。而且这个错误 `node --check` 有时
+    也能看出来、有时只会静默地把模板截短（后面还有别的反引号能让文件继续"看起来合法"），
+    所以必须用 dsview/check_renderer.py 同时检查语法和模板边界。
+    """
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'dsview', 'check_renderer.py')],
+                       capture_output=True, text=True, encoding='utf-8', errors='replace')
+    assert r.returncode == 0, ('renderer.js 检查未通过：\n%s\n%s'
+                               % (r.stdout or '', r.stderr or ''))
 
 
 class Ev:
@@ -440,6 +461,123 @@ def _fresh_sessions(app, n=40):
     return app
 
 
+def test_search_then_click_opens_the_right_session(app):
+    """★ 搜索后点击，必须打开**那一行显示的**会话，而不是别的。
+
+    事故（用户实测）："输入关键词后，鼠标光标停留在输入框，然后我点击会话会跳出
+    随机会话"。根因：`_row_at()` 返回的是 `self.view` 里的**可见行号**，
+    而 `self.items` 是**完整列表**；搜索过滤后 `view[row] != row`，
+    `_on_click` 却直接写 `self.items[i]` —— 于是点第一行打开的是 items[0]。
+    修法是所有"点击 → 定位数据"都过 `item_index()` 换算。这条测试就是钉住它。
+    """
+    app = _fresh_sessions(app)
+    lst = app.list
+    opened = []
+    lst.on_open = lambda it: opened.append(it['wxid'])
+
+    # 造一个只有部分命中关键词的列表：只有 wxid_3 的标题含"命中"
+    lst.items[3]['title'] = '命中目标'
+    lst.items[7]['title'] = '命中目标二'
+    lst.refresh_view('命中')
+    app.root.update()
+    assert lst.view == [3, 7], '前置条件：过滤后应只剩这两项，实际 %s' % (lst.view,)
+
+    # 点"可见的第 0 行"（= items[3]）
+    y0 = lst.y + lst.HEADER_H + 0 * lst.ROW_H + lst.ROW_H // 2
+    assert lst._row_at(y0) == 0, '坐标算错，应落在可见第 0 行'
+    app.sf.dispatch_input(_mk('press', lst.x + 200, y0))
+    app.sf.dispatch_input(_mk('release', lst.x + 200, y0))
+    app.root.update()
+    assert opened == ['wxid_3'], (
+        '★ 搜索后点第 0 行应打开 wxid_3（该行显示的会话），实际打开 %s' % opened)
+
+    # 再点"可见的第 1 行"（= items[7]）
+    opened.clear()
+    y1 = lst.y + lst.HEADER_H + 1 * lst.ROW_H + lst.ROW_H // 2
+    app.sf.dispatch_input(_mk('press', lst.x + 200, y1))
+    app.sf.dispatch_input(_mk('release', lst.x + 200, y1))
+    app.root.update()
+    assert opened == ['wxid_7'], (
+        '★ 搜索后点第 1 行应打开 wxid_7，实际打开 %s' % opened)
+
+
+def test_search_then_check_toggles_the_right_row(app):
+    """★ 搜索后点复选框，必须勾选**那一行显示的**会话（同一个根因的另一面）。"""
+    app = _fresh_sessions(app)
+    lst = app.list
+    lst.items[5]['title'] = '独一无二'
+    lst.refresh_view('独一无二')
+    app.root.update()
+    assert lst.view == [5], '前置条件：过滤后应只剩 items[5]'
+
+    y = lst.y + lst.HEADER_H + 0 * lst.ROW_H + lst.ROW_H // 2
+    app.sf.dispatch_input(_mk('press', lst.x + 20, y))       # x+20 = 勾选框区
+    app.sf.dispatch_input(_mk('release', lst.x + 20, y))
+    app.root.update()
+    assert lst.items[5]['sel'] is True, '应勾选 items[5]（该行显示的会话）'
+    others = [it['wxid'] for it in lst.items if it.get('sel')]
+    assert others == ['wxid_5'], '★ 只应勾选那一行，实际勾了 %s' % others
+
+
+def test_item_index_maps_view_to_items(app):
+    """item_index() 的语义：可见行号 → items 下标（搜索 bug 修的就是这个换算）。"""
+    app = _fresh_sessions(app)
+    lst = app.list
+    # 不过滤时两者一致
+    assert lst.item_index(0) == 0
+    # 过滤后必须走 view
+    lst.refresh_view('会话11')
+    app.root.update()
+    if lst.view:
+        assert lst.item_index(0) == lst.view[0], 'item_index 必须按 view 换算'
+    # 越界要返回 -1（调用方据此放弃，而不是索引到错的项）
+    assert lst.item_index(len(lst.items) + 100) == -1
+    assert lst.item_index(-1) == -1
+
+
+def test_click_on_canvas_takes_focus_away_from_search_box(app):
+    """★ 搜索之后点别处，键盘焦点必须从搜索框交出去。
+
+    用户原话（本轮遗留待查项）："输入关键词后鼠标光标会停留在输入框"。
+    根因：搜索框是一个**叠在画布上的真 tk.Entry**，而列表/按钮都是画在图元上
+    走的 `dispatch_input` —— 点画布不会自动把 Entry 的键盘焦点拿走。于是搜索完
+    再点列表，用户接着敲键盘还是打进搜索框（后面那个"跳出随机会话"的 bug 就是
+    在这条路上被发现的；那个已修，这条是另一个现象）。
+    修法：`Surface._install_input_pump` 在画布上按下鼠标时 `canvas.focus_set()`。
+    """
+    app = _fresh_sessions(app)
+    ent = app._search_entry.entry
+    assert ent.winfo_exists(), '会话页应该有搜索框'
+
+    # 用户点进搜索框并输入
+    ent.focus_force()
+    app.root.update()
+    app.search_var.set('会话1')
+    app.root.update()
+    assert app.root.focus_get() is ent, '前置条件：焦点应该在搜索框里'
+
+    # ⚠️ 这里必须用 `event_generate` 走**真实的 tk 绑定**，
+    #    不能像别的用例那样直接 `dispatch_input(...)`：焦点交接是装在
+    #    Surface 的 `<Button-1>` 绑定处理里的，绕过绑定就测不到它
+    #    （第一版就是这么写的，于是"修好了还失败"）。
+    lst = app.list
+    x = lst.x + 200
+    y = lst.y + lst.HEADER_H + lst.ROW_H // 2
+    app.sf.canvas.event_generate('<Button-1>', x=x, y=y, when='now')
+    app.sf.canvas.event_generate('<ButtonRelease-1>', x=x, y=y, when='now')
+    app.root.update()
+
+    focus = app.root.focus_get()
+    assert focus is not ent, (
+        '★ 点了列表之后焦点还留在搜索框上 —— 接着敲键盘会打进搜索框')
+    assert focus is app.sf.canvas, '焦点应交给画布，实际是 %r' % (focus,)
+
+    # 点回搜索框照样能拿到焦点（别把输入框本身弄坏了）
+    ent.focus_force()
+    app.root.update()
+    assert app.root.focus_get() is ent
+
+
 def test_mouse_wheel_scrolls(app):
     """滚轮必须能滚动列表。
 
@@ -620,6 +758,18 @@ def test_ds_page_builds_without_host(tagged):
     assert any('开始发送' in x for x in labels)
 
 
+def _hint_text(a):
+    """提示行的完整文字。
+
+    ⚠️ 提示行现在**按像素宽度折行**（左栏只有 330px 宽，一句话放不下），
+    所以 `itemcget('dshint')` 只给得到第一行；要看全就得把整块拼起来。
+    """
+    cv = a.sf.canvas
+    ids = sorted(cv.find_withtag('dshintline'),
+                 key=lambda i: cv.coords(i)[1] if cv.coords(i) else 0)
+    return ''.join(str(cv.itemcget(i, 'text')) for i in ids)
+
+
 def test_ds_scan_and_batch_summary(tagged, tmp_path):
     a = _no_ds_boot(_fresh_sessions(tagged))
     a.build_ds()
@@ -634,7 +784,7 @@ def test_ds_scan_and_batch_summary(tagged, tmp_path):
     assert len(a.list.items) == len(units)
 
     a._ds_update_hint()
-    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    txt = _hint_text(a)
     # 默认「只发文档（建议）」：图片被跳过 → 只剩 4 个文档、1 批
     assert '只发文档' in txt, txt
     assert '4 个文件' in txt and '1 批' in txt, txt
@@ -643,7 +793,7 @@ def test_ds_scan_and_batch_summary(tagged, tmp_path):
     a._ds_docs_only = False
     a._ds_limit = 20
     a._ds_update_hint()
-    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    txt = _hint_text(a)
     assert '67 个文件' in txt, txt
     assert '分 4 批' in txt, txt
     a._ds_docs_only = True
@@ -654,7 +804,7 @@ def test_ds_scan_and_batch_summary(tagged, tmp_path):
             it['sel'] = False
     a.ds_selected -= img_ids
     a._ds_update_hint()
-    txt = str(a.sf.canvas.itemcget('dshint', 'text'))
+    txt = _hint_text(a)
     assert '4 个文件' in txt
 
 
@@ -673,6 +823,349 @@ def test_ds_rect_stays_inside_window(tagged):
     assert x > 38 + a.DS_LEFT_W
     assert x + w <= a.W - 30 and y + h <= a.H - 30
     assert w > 300 and h > 200
+
+
+# ── 回归：官网页签的文字重叠 ──
+#
+# 事故（用户截图圈了 6 处）：那一页的 Y 坐标是**一个个手调出来的**
+# （副标题 70 / 工具栏 96 / 提示 132 / 警示 148 / 清单 164 / 选项 H-58 /
+#  路径 H-116 / 日志 H-24），谁也不认识谁，于是
+#   · 勾选统计那行被「发送清单」标题盖住；
+#   · 副标题和页签按钮挤在同一行；
+#   · 警示和工具栏同一水平线；
+#   · 「只发文档」复选框压在清单框下沿；
+#   · 「导出目录」和底部提示叠成一团。
+# 现在坐标只有**一个来源**：app_plus.ds_page_layout()（文件顶部有说明）。
+# 下面两条把"任意两行矩形不相交"固定成不变式：
+#   ① 布局表（纯函数，可以随便造窗口尺寸）—— 主检查；
+#   ② 真画一遍之后用 tk 的 bbox 量（字体高度、折行数都是真的）—— 兜底检查。
+
+import itertools
+
+
+def _rows_of(lay):
+    """布局表里所有**行/控件**矩形：(键, 中文名, 矩形)。
+
+    不包含 `tool_rect`（工具栏整行）：它本来就是"这一带的容器"，
+    和里面每个按钮天然相交。工具栏占的高度用 `tool_h` 另外断言。
+    """
+    out = [(k, n, r) for k, n, r, _, _ in lay['header']]
+    out += [(k, n, r) for k, n, r, _, _ in lay['text_rows']]
+    out += [(f'btn:{n}', f'工具栏按钮「{n}」', r) for n, r in lay['buttons']]
+    out += [('list', '发送清单', lay['list_rect']),
+            ('path', '导出目录', lay['path_rect']),
+            ('options', '选项行（只发文档/每批N个）', lay['opt_rect']),
+            ('log', '底部日志', lay['log_rect'])]
+    return out
+
+
+# 一个够用的按钮定义（和 App.DS_TOOLBAR_* 一致），纯粹为了把按钮矩形算出来
+_BTNS = dict(left_buttons=_A.App.DS_TOOLBAR_LEFT,
+             right_buttons=_A.App.DS_TOOLBAR_RIGHT)
+
+
+@pytest.mark.parametrize('W,H', [(1060, 700), (940, 700), (1060, 640),
+                                 (940, 640), (1280, 800)])
+def test_ds_layout_rows_never_overlap(W, H):
+    """官网页签：布局表里任意两行矩形不相交（含用户圈出的那 6 处重叠）。"""
+    lay = _A.ds_page_layout(W, H, **_BTNS)
+    rows = _rows_of(lay)
+    for (k1, n1, r1), (k2, n2, r2) in itertools.combinations(rows, 2):
+        assert not _A._rect_hit(r1, r2), (
+            f'{W}x{H}：{n1}{r1} 与 {n2}{r2} 重叠')
+
+
+@pytest.mark.parametrize('W,H', [(1060, 700), (940, 700), (1060, 640),
+                                 (940, 640), (1280, 800)])
+def test_ds_layout_keeps_browser_and_clickable_columns(W, H):
+    """两列硬约束（接管文档 5.8）：
+      ① 浏览器矩形（独立顶层窗口）不许压住要点击的控件；
+      ② 底部要点击的行必须留在 x < DS_BROWSER_X 的左栏里，否则点不到。
+    """
+    lay = _A.ds_page_layout(W, H, **_BTNS)
+    br = lay['browser_rect']
+    for k, n, r in _rows_of(lay):
+        if k == 'log':
+            continue        # 日志行画在浏览器下沿之下
+        assert not _A._rect_hit(r, br), f'{W}x{H}：{n}{r} 被浏览器矩形{br}压住'
+    # 工具栏整行（含两行排布时的高度）也必须完全在浏览器矩形之上
+    assert lay['tool_y'] + lay['tool_h'] <= br[1], (
+        f'{W}x{H}：工具栏底部 {lay["tool_y"] + lay["tool_h"]} 伸进了浏览器矩形 {br}')
+    # 要点击的按钮：不许和浏览器矩形相交（宽度够时「开始发送」落在浏览器
+    # 右边那一小条上，也不算被盖住）。其余按钮必须全部待在左栏里。
+    for n, r in lay['buttons']:
+        assert not _A._rect_hit(r, br), f'{W}x{H}：按钮「{n}」{r} 被浏览器矩形{br}压住'
+        if n == '🚀 开始发送':
+            continue
+        assert r[2] <= _A.DS_BROWSER_X, f'{W}x{H}：按钮「{n}」{r} 伸进浏览器区'
+    # 而且都在窗口里
+    for k, n, r in _rows_of(lay):
+        assert r[0] >= 0 and r[1] >= 0, f'{W}x{H}：{n} 跑到窗口左上角外面 {r}'
+        assert r[2] <= W and r[3] <= H, f'{W}x{H}：{n} 跑到窗口外面 {r}'
+
+
+def test_ds_layout_matches_folded_text(tagged):
+    """布局表算的折行数必须和真正画出来的行数一致。
+
+    事故预防：提示/警示行是按像素宽度折行的，折行数直接决定下面的坐标。
+    如果画的是一套、算的是另一套，清单就会盖住提示行（这正是老代码的问题）。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.ds_out_root = ''
+    a.ds_units = []
+    a.build_ds()
+    a.root.update()
+    cv = a.sf.canvas
+    lay = a._ds_layout()
+    assert len(cv.find_withtag('dshintline')) == len(
+        a._ds_wrap(a._ds_hint_text, lay['hint_rect'][2] - lay['hint_rect'][0], 9))
+    assert len(cv.find_withtag('dswarnline')) == len(
+        a._ds_wrap(a._ds_warn_text, lay['warn_rect'][2] - lay['warn_rect'][0], 9))
+    # 每块文字只有**一个**「第一行」图元。
+    # 事故：build_ds 里原来还建了一个空的 dshint 占位图元，而 Canvas 的
+    # itemcget(tag) 在多图元同 tag 时返回的是**第一个**（不是最新建的），
+    # 于是 itemcget('dshint') 读回空字符串 —— 提示行看起来像没画上。
+    assert len(cv.find_withtag('dshint')) == 1
+    assert len(cv.find_withtag('dswarn')) == 1
+
+
+def test_ds_theme_syncs_page_and_window_background(tagged):
+    """切主题要把**两样**东西同步给内嵌浏览器：页面配色 + 窗口底色。
+
+    为什么要底色：浏览器是独立顶层窗口，页面重绘的那一瞬间会露出它自己的
+    backgroundColor；纯白配深色面板就会闪一个白角（用户说的"两个软件"里
+    有一部分就是这种边界感）。所以 /theme 之外还有一条 /bg。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+
+    class Host:
+        running = True
+        calls = []
+
+        def set_theme(self, mode):
+            Host.calls.append(('theme', mode))
+            return {'ok': True}
+
+        def set_background(self, color):
+            Host.calls.append(('bg', color))
+            return {'ok': True}
+
+    a.ds = Host()
+    try:
+        a.theme = _A.T.THEMES['dark']
+        a._ds_apply_theme()
+        a.theme = _A.T.THEMES['light']
+        a._ds_apply_theme()
+    finally:
+        a.ds = None
+    assert ('theme', 'dark') in Host.calls, Host.calls
+    assert ('theme', 'light') in Host.calls, Host.calls
+    assert ('bg', a.DS_PANEL_FILL) in Host.calls, Host.calls
+    assert len([c for c in Host.calls if c[0] == 'bg']) == 2, '每次切主题都要同步底色'
+
+
+def test_ds_widgets_are_placed_at_layout_coordinates(tagged):
+    """控件必须画在布局表说的位置上（表算得对、控件放错，一样会压字）。
+
+    这是"布局表成为唯一事实来源"这条约束的守门测试：以后谁把某个坐标写回
+    常数，这条就会红。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.ds_out_root = ''
+    a.ds_units = []
+    a.build_ds()
+    a.root.update()
+    lay = a._ds_layout()
+
+    assert (a.list.x, a.list.y) == (38, lay['list_y']), '发送清单没放在布局表的位置'
+    assert a.list.h == lay['list_h']
+    assert a.list.w == a.DS_LEFT_W
+    assert a.list.HEADER_H == lay['list_head'], '表头高度变了要同步布局表'
+
+    got = {str(getattr(w, 'text', '')): (w.x, w.y, w.w, w.h) for w in a._widgets
+           if hasattr(w, 'x') and hasattr(w, 'h')}
+    # 用**带按钮定义**的那一份表（不传按钮得到的是一组空按钮，别拿它比）。
+    # 这里直接复算一遍表，顺便验证 App 放进表里的按钮定义没被改坏。
+    lay_btn = _A.ds_page_layout(1060, 700, left_buttons=_A.App.DS_TOOLBAR_LEFT,
+                                right_buttons=_A.App.DS_TOOLBAR_RIGHT)
+    for label, rect in lay_btn['buttons']:
+        wx, wy, ww, wh = got.get(label, (None, None, None, None))
+        assert (wx, wy, wx + ww, wy + wh) == rect, (
+            f'按钮「{label}」位置不对：{(wx, wy, wx + ww, wy + wh)} != {rect}')
+    # 底部那两行的纵向位置
+    assert a._ds_opt_y == lay['opt_y']
+    assert a._batch_btn.y == lay['opt_y'] - 13
+    assert a._batch_btn.text == a._batch_label()
+    cb = a._docs_cb
+    assert cb.y >= lay['list_rect'][3] + 6, (
+        f'复选框压在清单下沿上：cb.y={cb.y} 清单底={lay["list_rect"][3]}')
+    assert cb.y + cb.box <= lay['opt_rect'][3], (
+        f'复选框超出选项行：{cb.y + cb.box} > {lay["opt_rect"][3]}')
+    # 浏览器矩形＝画布上那块占位面板（严丝合缝，不许外扩）
+    assert a._ds_rect() == (lay['browser_rect'][0], lay['browser_rect'][1],
+                            lay['browser_rect'][2] - lay['browser_rect'][0],
+                            lay['browser_rect'][3] - lay['browser_rect'][1])
+
+
+def test_ds_follow_skips_when_minimized(tagged):
+    """主窗口最小化时不要再去摆浏览器窗口（**Electron 后端的逻辑**）。
+
+    事故预防：主窗口最小化后 `<Configure>` 还会来，如果无脑 move()，浏览器
+    会被"拽"回一个屏幕外的位置或反复显示 —— 而且它本来该在最小化时藏起来
+    （见 `_on_root_unmap`，那正是为了消掉"桌面上孤零零一块官网"的观感）。
+
+    ⚠️ 这条只对 **electron** 后端成立：webview2 是画布子控件，跟随时它自动跟着走，
+    `_ds_follow()` 会直接返回（这正是"真嵌入"要的效果），所以这里显式把后端切成 electron。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.settings['ds_backend'] = 'electron'
+
+    class Host:
+        running = True
+        moved = []
+
+        def move(self, x, y, w, h):
+            Host.moved.append((x, y, w, h))
+
+    a.ds = Host()
+    a.page = 'ds'
+    a._ds_visible = True
+    saved = a.root.state
+    try:
+        a.root.state = lambda: 'iconic'
+        a._ds_follow()
+        assert Host.moved == [], '最小化时不该摆位，实际摆了 %s' % (Host.moved,)
+        a.root.state = lambda: 'normal'
+        a._ds_follow()
+        assert len(Host.moved) == 1, '恢复后应该摆一次位，实际 %s' % (Host.moved,)
+    finally:
+        a.root.state = saved
+        a.ds = None
+        a.page = 'sessions'
+        a._ds_visible = False
+        a.settings.pop('ds_backend', None)
+
+
+def test_ds_follow_is_noop_for_webview2(tagged):
+    """webview2 后端不需要"跟随"：子控件跟着父窗口走，`_ds_follow()` 必须直接返回。
+
+    这条是"真嵌入"的守门断言：一旦有人把跟随逻辑又接回 webview2 后端，
+    就说明我们又在"把子控件当独立窗口摆位"，那种错位正是用户抱怨的观感问题。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.settings['ds_backend'] = 'webview2'
+
+    class Host:
+        running = True
+        moved = []
+
+        def move(self, x, y, w, h):
+            Host.moved.append((x, y, w, h))
+
+    a.ds = Host()
+    a.page = 'ds'
+    a._ds_visible = True
+    try:
+        a._ds_follow()
+        assert Host.moved == [], 'webview2 不该有跟随动作，实际 %s' % (Host.moved,)
+    finally:
+        a.ds = None
+        a.page = 'sessions'
+        a._ds_visible = False
+        a.settings.pop('ds_backend', None)
+
+
+def test_hover_highlight_follows_mouse_after_search(app):
+    """★ 搜索之后，鼠标移到某一行上，那一行必须变灰（悬停高亮）。
+
+    事故（用户实测："搜索词填完后鼠标移动到会话上会话没有变灰"）：
+    `hover_row` 存的是**可见行号**，而 `_draw_row` 拿它当 **items 下标**用。
+    不过滤时两者相等，所以一直没暴露；一搜索 `view[row] != row`，
+    悬停可见第 0 行点亮的是 `items[0]` —— 高亮跑到别的行，用户看到"移上去没反应"。
+    （这和 `_on_click` 那个"点会话跳出随机会话"是同一个根因的两面。）
+    """
+    app = _fresh_sessions(app)
+    lst = app.list
+    lst.items[3]['title'] = '命中目标'
+    lst.items[7]['title'] = '命中目标二'
+
+    # 未搜索时先悬停一行
+    y3 = lst.y + lst.HEADER_H + 3 * lst.ROW_H + lst.ROW_H // 2
+    app.sf.canvas.event_generate('<Motion>', x=lst.x + 200, y=y3, when='now')
+    app.root.update()
+    assert lst.hover_row == 3, '前置条件：未搜索时应该悬停到 items[3]'
+
+    # 输入搜索词：剩下 items[3] 和 items[7]
+    app.search_var.set('命中目标')
+    app.root.update()
+    assert lst.view == [3, 7], '前置条件：过滤后应只剩 items[3] 与 items[7]'
+
+    # ⚠️ 关键：鼠标先移出列表（把高亮撤掉），再移到过滤结果的第 0 行。
+    #    不能直接拿"刚搜索完"当基线 —— 那时指针还停在第 3 行上，高亮本来就在。
+    app.sf.canvas.event_generate('<Motion>', x=lst.x + 200, y=lst.y - 20, when='now')
+    app.root.update()
+    assert lst.hover_row == -1, '移出列表后高亮应清零'
+    base3 = len(app.sf.canvas.find_withtag(lst._row_tag(3)))
+
+    y0 = lst.y + lst.HEADER_H + 0 * lst.ROW_H + lst.ROW_H // 2
+    app.sf.canvas.event_generate('<Motion>', x=lst.x + 200, y=y0, when='now')
+    app.root.update()
+    assert lst.hover_row == 3, (
+        '★ 搜索后 hover_row 应按 view 换算成 items 下标（期望 3，实际 %s）'
+        % lst.hover_row)
+    after3 = len(app.sf.canvas.find_withtag(lst._row_tag(3)))
+    assert after3 > base3, (
+        '★ 悬停的那一行没有多出高亮背景图元（移开=%d 悬停=%d）—— 就是"没有变灰"'
+        % (base3, after3))
+    # 别的行不许被点亮（老 bug 就是把高亮打到了 items[0] 上）
+    assert len(app.sf.canvas.find_withtag(lst._row_tag(0))) == 0, \
+        '高亮跑到 items[0] 上去了（view/items 下标又混用了）'
+
+    # 移到过滤结果的第 1 行 → 高亮跟着走，前一行要撤掉
+    y1 = lst.y + lst.HEADER_H + 1 * lst.ROW_H + lst.ROW_H // 2
+    app.sf.canvas.event_generate('<Motion>', x=lst.x + 200, y=y1, when='now')
+    app.root.update()
+    assert lst.hover_row == 7, '悬停第 1 行应换成 items[7]，实际 %s' % lst.hover_row
+    assert len(app.sf.canvas.find_withtag(lst._row_tag(3))) == base3, \
+        '换行之后上一行的高亮要撤掉'
+
+
+def test_ds_page_text_boxes_never_overlap(tagged):
+    """真画一遍之后，用 tk 自己的 bbox 量：任意两段文字都不相交。
+
+    为什么还要这条：纯函数只能保证"表里写的数"，字号/字体/折行是 tk 算的。
+    这里把**真正画上去的**矩形拿回来再查一遍 —— 包括清单自己的表头
+    （「发送清单」标题 + 「共 N 个 · 已选 M 个」），老代码的 6 处重叠里
+    第一处就是它盖住了勾选统计那行。
+    """
+    a = _no_ds_boot(_fresh_sessions(tagged))
+    a.ds_out_root = ''
+    a.ds_units = []
+    a.build_ds()
+    a.root.update()
+    cv = a.sf.canvas
+
+    items = []
+    for tag in ('dshintline', 'dswarnline', 'dspath', 'dslog', 'dssubtitle'):
+        for i in cv.find_withtag(tag):
+            if str(cv.itemcget(i, 'text') or '').strip():
+                items.append((tag, i))
+    # 清单面板的表头一带（标题/计数）单独量：整表重绘会攒图元，
+    # 这里只取**当前**这块面板上、位于表头高度内的文字
+    lx, ly, lx2, ly2 = a.list.x, a.list.y, a.list.x + a.list.w, a.list.y + a.list.HEADER_H
+    for i in cv.find_overlapping(lx, ly, lx2, ly2):
+        if cv.type(i) == 'text' and str(cv.itemcget(i, 'text') or '').strip():
+            items.append(('listheader', i))
+
+    boxes = []
+    for tag, i in items:
+        bb = cv.bbox(i)
+        assert bb, f'{tag} 图元 {i} 没有 bbox'
+        boxes.append((tag, str(cv.itemcget(i, 'text'))[:24], bb))
+    assert len(boxes) >= 5, f'官网页签的文字太少？只找到 {boxes}'
+    for (t1, x1, b1), (t2, x2, b2) in itertools.combinations(boxes, 2):
+        assert not _A._rect_hit(b1, b2), (
+            f'文字重叠：{t1}「{x1}」{b1} 与 {t2}「{x2}」{b2}')
 
 
 # ── 回归：标签弹窗必须真的能交互 ──
@@ -947,37 +1440,25 @@ def test_ds_preflight_accepts_page_ready_by_ready_state(tagged):
     a.ds = None
 
 
-def test_ds_ask_sends_text_through_host(tagged, tmp_path):
-    """「发给 AI」那条通道必须真的把文字交给宿主（走 insertText，不依赖键盘焦点）。
+def test_ds_page_has_no_text_send_box(tagged, tmp_path):
+    """官网页签**不该**再有那条「发给 AI」输入框。
 
-    为什么要这条通道：内嵌页是跨进程子窗口，切页/切回窗口时可能收不到真实按键
-    （用户反馈"打不了字"）。这条走 Electron 的 insertText，一定可用。
+    它曾经画在 canvas x 560~934 —— 右侧内嵌浏览器从 x=382 起，所以它整条压在
+    官网页面头上，用户看到它悬在页面上方，以为"发话必须走这条"，反而找不到
+    官网自己的输入框（用户实测反馈）。它当初存在的理由是"跨进程子窗口收不到
+    键盘"，而那是 ds_bridge.host._attach_input() 里 ctypes.wintypes 没 import
+    的 bug（已修）。现在内嵌页能正常收键盘，这条 UI 就是纯干扰。
+
+    后端通道（host.type_text / Electron 的 /type）保留，继续供排查使用。
     """
     a = _no_ds_boot(_fresh_sessions(tagged))
     _ds_ready_app(a, tmp_path)
-
-    class FakeDS:
-        running = True
-        _embedded = True
-
-        def __init__(self):
-            self.calls = []
-
-        def type_text(self, text, submit=False):
-            self.calls.append((text, submit))
-            return {'ok': True, 'send': {'ok': True, 'how': 'button'}}
-
-    a.ds = FakeDS()
-    a._ask_entry.set('我已发送完毕')
-    a._ds_ask()
-    a.root.update()
-    assert a.ds.calls == [('我已发送完毕', True)], a.ds.calls
-    assert a._ask_entry.get() == '', '发完应该清空输入框'
-
-    # 空内容不该发
-    a._ds_ask()
-    a.root.update()
-    assert len(a.ds.calls) == 1
+    assert not hasattr(a, '_ask_entry'), '「发给 AI」输入框应该已经删掉'
+    assert not hasattr(a, 'btn_ds_ask'), '「发给 AI」发送键应该已经删掉'
+    assert not hasattr(a, '_ds_ask'), '_ds_ask 方法应该一起删掉'
+    # 开始发送键必须在，别把主功能删错了
+    assert hasattr(a, 'btn_ds_send')
+    a.ds = None
 
 
 def test_ds_send_refreshes_stale_prompt_file(tagged, tmp_path):

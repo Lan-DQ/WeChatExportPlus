@@ -398,6 +398,20 @@ def main():
             bad('/type 带 submit：文字已写入并尝试发送', json.dumps(t2, ensure_ascii=False)[:300])
         time.sleep(0.6)
 
+        step('POST /focus（键盘焦点必须真的进到页面）')
+        # 事故：/focus 里调了 showInactive()（= 显示但不激活），把刚设好的焦点又撤掉，
+        # 于是它永远返回 focused:false —— 而 Chromium 认为窗口没焦点时**不处理键盘输入**，
+        # 表现就是"点进输入框打不了字"。这条断言就是防止那行调用再被加回来。
+        code, fc = api(port, '/focus', {})
+        print('  /focus -> %s' % json.dumps(fc, ensure_ascii=False)[:200])
+        if fc.get('ok') and fc.get('focused') is True:
+            ok('/focus 后 webContents 真有焦点（focused=true）',
+               'winFocused=%s' % fc.get('winFocused'))
+        else:
+            bad('/focus 后 webContents 真有焦点（focused=true）',
+                '★ 页面拿不到键盘焦点的直接原因就在这里：%s'
+                % json.dumps(fc, ensure_ascii=False)[:200])
+
         step('POST /diag')
         code, dg = api(port, '/diag', {})
         print('  /diag -> %s' % json.dumps(dg, ensure_ascii=False))

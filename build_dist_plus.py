@@ -59,7 +59,29 @@ HIDDEN_IMPORTS = [
     'ai_prompt', 'ui_theme', 'ui_widgets', 'session_tags', 'PIL.ImageTk',
     'PIL.ImageFilter', 'fpdf', 'fpdf.fonts', 'openpyxl', 'PIL', 'Crypto.Cipher.AES',
     'ds_bridge', 'ds_bridge.host', 'ds_bridge.plan', 'ds_bridge.sender',
+    # ★ WebView2 真嵌入后端（默认后端）：
+    #   · webview2_host 自己是我们写的模块；
+    #   · webview / clr / pythonnet 是**运行期才 import** 的（懒加载），
+    #     PyInstaller 静态分析看不到，必须显式列出来；
+    #   · comtypes 被 webview 的某些后端用到，一并带上免得缺依赖。
+    'ds_bridge.webview2_host', 'webview', 'clr', 'pythonnet', 'comtypes',
+    # ⚠️ ctypes.wintypes 是子模块，必须显式列出来：`import ctypes` 不会带出它。
+    #    漏掉的后果是打包版里 ds_bridge.host._attach_input() 抛 AttributeError
+    #    （被 except 吞掉），键盘修复静默失效 —— 真实发生过。
+    'ctypes.wintypes',
 ]
+
+# PyInstaller 额外要"整包收进来"的第三方库。
+#
+# ⚠️⚠️ **别把 webview / comtypes 加进来**（我加过一次，结果打包版主窗口再也不出现，
+# 控制台也不报错，查了很久）：pywebview 带着微软的 .NET 程序集、comtypes 会在
+# 打包期去注册表扫类型库，这两样被 --collect-all 拖进来会污染冻结环境，
+# 表现是"进程活着但没有窗口"。我们**本来就不需要它们**：
+#   · WebView2 的程序集由 `webview2_host._webview_sdk_dir()` 运行时从
+#     `webview/lib` 目录加载（`copy_ds()` 会把 webview/lib 一起打进包里）；
+#   · .NET 宿主由 pythonnet 自己的 hook（`hook-clr.py`）负责，加个
+#     hidden-import 'clr' 就够了。
+COLLECT_ALL = []
 
 
 def log(msg):
@@ -197,6 +219,43 @@ def copy_ds():
                                                   'node_modules'))
     log('  [OK] dsview/（不含 mock/自检脚本）')
 
+    # ── WebView2 真嵌入后端要用的东西 ──
+    # ① pywebview 里的微软程序集目录（webview/lib）：
+    #    `Microsoft.Web.WebView2.Core.dll` / `.WinForms.dll` 和 x64 的
+    #    `WebView2Loader.dll`。运行期由 `webview2_host._webview_sdk_dir()` 从
+    #    `<包根>/webview/lib` 加载 —— 所以必须**按这个相对路径**放好。
+    # ② pythonnet 的运行时 dll（clr.pyd / Python.Runtime.dll）：不在包内的话
+    #    `import clr` 会失败，WebView2 后端就起不来（Electron 退路仍然可用）。
+    try:
+        import webview as _wv
+        wv_src = os.path.join(os.path.dirname(os.path.abspath(_wv.__file__)), 'lib')
+        if os.path.isdir(wv_src):
+            wv_dst = os.path.join(DIST, 'webview', 'lib')
+            if os.path.isdir(wv_dst):
+                shutil.rmtree(wv_dst)
+            shutil.copytree(wv_src, wv_dst)
+            n = sum(len(f) for _, _, f in os.walk(wv_dst))
+            log(f'  [OK] webview/lib（WebView2 程序集 {n} 个文件）')
+        else:
+            log('  [!!] 没找到 pywebview 的 lib 目录 —— WebView2 后端可能起不来')
+    except ImportError:
+        log('  [!!] 没装 pywebview —— WebView2 后端起不来（可把 ds_backend 设回 electron）')
+
+    try:
+        import pythonnet  # noqa: F401
+        pn_src = os.path.dirname(os.path.abspath(
+            __import__('pythonnet').__file__))
+        # pythonnet 的运行时装在 pythonnet/runtime 下
+        rt = os.path.join(pn_src, 'runtime')
+        if os.path.isdir(rt):
+            rt_dst = os.path.join(DIST, 'pythonnet_runtime')
+            if os.path.isdir(rt_dst):
+                shutil.rmtree(rt_dst)
+            shutil.copytree(rt, rt_dst)
+            log('  [OK] pythonnet_runtime/（.NET 宿主 dll）')
+    except Exception as e:                      # noqa: BLE001
+        log(f'  [!!] 复制 pythonnet 运行时失败：{e}')
+
 
 def copy_icon():
     for name in ('icon.ico',):
@@ -265,6 +324,9 @@ def main():
     ap.add_argument('--out', default='',
                     help='输出目录（默认 dist\\WeChatExportPlus）。'
                          '旧版本的程序还开着时 exe 会被锁住，用这个打到别处')
+    ap.add_argument('--console', action='store_true',
+                    help='打成带控制台的 exe（排查"窗口不出现"这类问题时用，'
+                         '能直接看到 Python 的报错）')
     args = ap.parse_args()
 
     # 输出目录可以整体搬走：旧 exe 正在运行（用户还在测）时不能原地覆盖
@@ -300,22 +362,27 @@ def main():
     if not args.skip_build:
         log('\n[1] PyInstaller 打包 GUI...')
         cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
-               '--onefile',
-               '--windowed', '--name', APP_NAME,
-               '--distpath', DIST,
-               '--workpath', BUILD,
-               '--specpath', BUILD,
-               '--paths', ROOT,
-               '--paths', os.path.join(ROOT, 'scripts'),
-               '--paths', os.path.join(ROOT, 'exporters'),
-               '--paths', os.path.join(ROOT, 'gui'),
-               '--icon', os.path.join(ROOT, 'gui', 'icon.ico')]
+               '--onefile']
+        # ⚠️ --windowed 是正式形态；排查"窗口不出现"这类问题时用 --console，
+        #    报错才会出现在控制台上（windowered 版会把 traceback 吞掉）。
+        cmd += ['--console'] if args.console else ['--windowed']
+        cmd += ['--name', APP_NAME,
+                '--distpath', DIST,
+                '--workpath', BUILD,
+                '--specpath', BUILD,
+                '--paths', ROOT,
+                '--paths', os.path.join(ROOT, 'scripts'),
+                '--paths', os.path.join(ROOT, 'exporters'),
+                '--paths', os.path.join(ROOT, 'gui'),
+                '--icon', os.path.join(ROOT, 'gui', 'icon.ico')]
         # 开发期 ROOT 下可能有指向内核大目录的 junction（runtime/dll/electron/resources），
         # 明确排除掉，避免 PyInstaller 顺着链接把几百 MB 的二进制塞进 exe。
         for name in ('runtime', 'dll', 'electron', 'resources', 'gui', 'tests', 'tasks'):
             cmd += ['--exclude-module', name]
         for h in HIDDEN_IMPORTS:
             cmd += ['--hidden-import', h]
+        for pkg in COLLECT_ALL:
+            cmd += ['--collect-all', pkg]
         cmd.append(os.path.join(ROOT, 'gui', 'app_plus.py'))
         subprocess.run(cmd, cwd=ROOT, check=True)
         log('  [OK] exe 打包完成')

@@ -116,8 +116,9 @@ def test_real_export_tree_end_to_end(tmp_path):
     host = FakeHost()
     res = _mk_sender(host).run(batches)
 
-    assert [len(c[1]) for c in host.calls if c[0] == 'send'] == [50, 17]
-    assert res['ok'] and res['stopped'] == 1
+    assert [len(c[1]) for c in host.calls if c[0] == 'send'] == [30, 30, 7]
+    # 3 批 → 前 2 批是非最后一批，各截断一次；最后一批不截断
+    assert res['ok'] and res['stopped'] == 2
     assert res['sent_files'] == 67
     assert host.over_limit == []
 

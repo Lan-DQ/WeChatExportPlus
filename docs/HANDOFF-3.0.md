@@ -29,11 +29,38 @@
 | 发布目录 | `C:\My_GongJu\grab\WeChatExportPlus_发布版` |
 | 打包出的 zip | `C:\My_GongJu\grab\WeChatExportPlus_v2.2.0_win64.zip` |
 | 临时调试脚本 | `C:\My_GongJu\grab\_probe\`（**不在仓库里**，可随时删） |
+| **TOKEN** | `C:\My_GongJu\grab\WeChatExportPlus\ME.token`（已 gitignore） |
 | 版本 | 当前 v2.2.0，目标做 v3.0 |
 
 ⚠️ **2026-09-13 这个仓库目录曾被误删过一次**，当时从 GitHub 重新 clone 恢复。
 如果发现目录不见了：先查回收站，或直接重新 clone（代码全在 GitHub，不会丢）。
-但 `ME.token`（GitHub PAT）不在仓库里，删了就没了。
+
+### ★ TOKEN 在哪（发布前必看）
+
+**位置：`C:\My_GongJu\grab\WeChatExportPlus\ME.token`**（40 字符，`gho_` 开头）
+
+- 这是 GitHub PAT，**scope 含 `repo`**，能推代码 + 发 Release
+- **`.gitignore` 已排除 `*.token`**，不会被提交（已用 `git check-ignore` 验证）
+- 发布脚本会**自动读它**：`publish_release.py` 按
+  「环境变量 `GH_TOKEN`/`GITHUB_TOKEN` → 仓库根任意 `*.token`」的顺序查找，不用手动传
+
+**`git push` 要临时注入**（token 绝不写进 remote URL）：
+```powershell
+cd C:\My_GongJu\grab\WeChatExportPlus
+$env:WE_GH_TOKEN = (Get-Content ME.token -Raw).Trim()
+$helper = '!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "x-access-token" "$WE_GH_TOKEN"; }; f'
+git -c "credential.helper=$helper" push origin main
+Remove-Item Env:\WE_GH_TOKEN
+```
+
+> **安全约定**：token 绝不写进 remote URL、绝不 commit。
+> 历史上曾因 git 报错信息把 token 打进日志，那个已作废重发。
+> `ME.token` 再丢的话：从 Windows 凭据管理器取
+> （`git credential fill` 里有 `Lan-DQ` 的凭据），或去
+> https://github.com/settings/tokens 重新生成。
+
+**token 不在时也能干活**：本地提交没问题，只是推送/发布做不了 ——
+照实告诉用户「提交已在本地，恢复后重推」，别想办法绕过。
 
 ---
 
