@@ -34,6 +34,11 @@ key_status.txt
 # 会话标签：用户自己打的标签
 /会话标签.json
 /会话标签.json.tmp
+# 用户设置：里面有**使用者的真实目录**（导出目录、上次选过的路径），对外必须脱敏
+/.ui_settings
+# 界面/宿主运行日志（含运行路径与时间）
+/.wv2_start.log
+/.ui_errors.log
 # 内嵌 DeepSeek 官网页的登录态（Chromium profile，里面有 cookie）
 /ds_profile/
 /.boot.log

@@ -176,7 +176,7 @@ def extract_body_content(msg: dict) -> tuple:
 
 ## 8. 输出目录布局（核心契约）
 
-用户点击「导出」→ 选择总目录（如 `C:\Users\LanDeQuan\Desktop`）→ 程序生成：
+用户点击「导出」→ 选择总目录（如 `C:\Users\<用户名>\Desktop`）→ 程序生成：
 
 ```
 <用户选择的总目录>\
